@@ -37,6 +37,8 @@ pub struct PaneState {
     pub input: InputState,
     /// Index of the selected message (for reply/edit/delete). None = no selection.
     pub selected_message: Option<usize>,
+    /// Message ID pending delete confirmation. None = not confirming.
+    pub confirming_delete: Option<Id<MessageMarker>>,
 }
 
 impl PaneState {
@@ -48,6 +50,7 @@ impl PaneState {
             scroll: ScrollState::Following,
             input: InputState::default(),
             selected_message: None,
+            confirming_delete: None,
         }
     }
 }
@@ -77,6 +80,9 @@ pub struct AppState {
     // Status
     pub status_message: Option<String>,
     pub status_error: Option<String>,
+
+    // Current user (set after login/gateway READY)
+    pub current_user_id: Option<Id<UserMarker>>,
 }
 
 impl AppState {
@@ -101,6 +107,7 @@ impl AppState {
             theme,
             status_message: None,
             status_error: None,
+            current_user_id: None,
         }
     }
 
@@ -364,6 +371,91 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         Action::ResizePane(_, _) => true,
         Action::ToggleZoom => true,
         Action::SwapPane(_) => true,
+
+        // Message interaction (from features worker)
+        // Note: read from cache/pane immutably first, then mutate, to satisfy borrow checker
+        Action::StartReply => {
+            let pane = state.focused_pane();
+            let msg_id = pane.selected_message
+                .and_then(|idx| pane.channel_id.and_then(|ch| {
+                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx).map(|m| m.id))
+                }));
+            if let Some(id) = msg_id {
+                state.focused_pane_mut().input.reply_to = Some(id);
+                state.input_mode = InputMode::Insert;
+                true
+            } else {
+                false
+            }
+        }
+        Action::StartEdit => {
+            let pane = state.focused_pane();
+            let edit_info = pane.selected_message
+                .and_then(|idx| pane.channel_id.and_then(|ch| {
+                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx))
+                        .filter(|msg| Some(msg.author_id) == state.current_user_id)
+                        .map(|msg| (msg.id, msg.content.clone()))
+                }));
+            if let Some((id, content)) = edit_info {
+                let len = content.len();
+                let pane = state.focused_pane_mut();
+                pane.input.editing = Some(id);
+                pane.input.content = content;
+                pane.input.cursor_pos = len;
+                pane.input.cursor_col = len;
+                state.input_mode = InputMode::Insert;
+                true
+            } else {
+                false
+            }
+        }
+        Action::StartDelete => {
+            let pane = state.focused_pane();
+            let msg_id = pane.selected_message
+                .and_then(|idx| pane.channel_id.and_then(|ch| {
+                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx))
+                        .filter(|msg| Some(msg.author_id) == state.current_user_id)
+                        .map(|msg| msg.id)
+                }));
+            if let Some(id) = msg_id {
+                state.focused_pane_mut().confirming_delete = Some(id);
+                true
+            } else {
+                false
+            }
+        }
+        Action::ConfirmDelete => {
+            let pane = state.focused_pane_mut();
+            if let Some(_msg_id) = pane.confirming_delete.take() {
+                // Would produce HttpRequest::DeleteMessage in real event loop
+                true
+            } else {
+                false
+            }
+        }
+        Action::CancelDelete => {
+            let pane = state.focused_pane_mut();
+            pane.confirming_delete = None;
+            true
+        }
+        Action::SelectMessageUp => {
+            let pane = state.focused_pane_mut();
+            if let Some(idx) = pane.selected_message {
+                if idx > 0 {
+                    pane.selected_message = Some(idx - 1);
+                }
+            } else {
+                pane.selected_message = Some(0);
+            }
+            true
+        }
+        Action::SelectMessageDown => {
+            let pane = state.focused_pane_mut();
+            if let Some(idx) = pane.selected_message {
+                pane.selected_message = Some(idx + 1);
+            }
+            true
+        }
 
         Action::Quit | Action::ForceQuit => true,
     }
