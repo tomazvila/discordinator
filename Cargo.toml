@@ -1,0 +1,65 @@
+[package]
+name = "discordinator"
+version = "0.1.0"
+edition = "2021"
+description = "Discord TUI client with tmux-like split pane support"
+
+[dependencies]
+# TUI framework
+ratatui = "0.30.0"
+crossterm = "0.28"
+
+# Discord data types only (NOT gateway/http - those are bot-only)
+twilight-model = "0.16"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Custom gateway (WebSocket + compression)
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+flate2 = "1"
+
+# Custom HTTP client (with anti-detection headers)
+reqwest = { version = "0.12", features = ["json", "native-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Secure token storage
+keyring = { version = "3.6", features = ["apple-native", "sync-secret-service"] }
+
+# Error handling
+color-eyre = "0.6"
+eyre = "0.6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Configuration
+toml = "0.8"
+dirs = "6"
+
+# Encoding
+base64 = "0.22"
+
+# QR code
+qrcode = "0.14"
+
+# Random (for jitter)
+rand = "0.8"
+
+# Time
+chrono = "0.4"
+
+# Futures
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
