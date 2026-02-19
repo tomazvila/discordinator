@@ -8,6 +8,7 @@
 # Usage:
 #   ./orchestrate.sh                    # Full 5-phase run
 #   ./orchestrate.sh --phase 2          # Start from phase 2 (foundation already merged)
+#   ./orchestrate.sh --phase 4 --end-phase 4  # Run only phase 4
 #   ./orchestrate.sh --max-iter 30      # Limit iterations per worker
 #   ./orchestrate.sh --dry-run          # Show plan without executing
 
@@ -24,6 +25,7 @@ MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE_BASE="$(dirname "$MAIN_DIR")"
 MAX_ITER_PER_WORKER=50
 START_PHASE=1
+END_PHASE=5
 DRY_RUN=false
 POLL_INTERVAL=30  # seconds between status checks
 
@@ -53,6 +55,10 @@ while [[ $# -gt 0 ]]; do
             START_PHASE="$2"
             shift 2
             ;;
+        --end-phase)
+            END_PHASE="$2"
+            shift 2
+            ;;
         --max-iter)
             MAX_ITER_PER_WORKER="$2"
             shift 2
@@ -70,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --phase N       Start from phase N (1-5, default: 1)"
+            echo "  --end-phase N   Stop after phase N (1-5, default: 5)"
             echo "  --max-iter N    Max iterations per worker (default: 50)"
             echo "  --dry-run       Show plan without executing"
             echo "  --poll N        Status poll interval in seconds (default: 30)"
@@ -295,6 +302,16 @@ merge_worker() {
 
     log "  Merge conflicts detected, resolving..."
 
+    # Auto-resolve target/ conflicts — remove from tracking (should be .gitignored)
+    for f in $(git diff --name-only --diff-filter=U 2>/dev/null | grep "^target/" || true); do
+        git rm -f "$f" 2>/dev/null || git checkout --ours "$f" 2>/dev/null && git add "$f" || true
+    done
+
+    # Auto-resolve ralph log/status file conflicts — accept theirs
+    for f in $(git diff --name-only --diff-filter=U 2>/dev/null | grep -E "(ralph_log|ralph_status)" || true); do
+        git rm -f "$f" 2>/dev/null || true
+    done
+
     # Auto-resolve Cargo.lock — always regenerate
     if git diff --name-only --diff-filter=U | grep -q "Cargo.lock"; then
         log "  Resolving Cargo.lock (will regenerate)"
@@ -388,6 +405,7 @@ if $DRY_RUN; then
     echo "Worktree base: $WORKTREE_BASE"
     echo "Max iterations per worker: $MAX_ITER_PER_WORKER"
     echo "Starting from phase: $START_PHASE"
+    echo "Ending at phase: $END_PHASE"
     echo ""
     echo "Phase 1 — Foundation (sequential)"
     echo "  Worker: foundation"
@@ -447,7 +465,7 @@ ORCHESTRATE_START=$(date +%s)
 # Phase 1: Foundation (Sequential)
 # ============================================================================
 
-if [ "$START_PHASE" -le 1 ]; then
+if [ "$START_PHASE" -le 1 ] && [ "$END_PHASE" -ge 1 ]; then
     log_phase 1 "Foundation (sequential) — Tasks $PHASE1_TASKS"
 
     create_worktree "foundation"
@@ -471,7 +489,7 @@ fi
 # Phase 2: Parallel Workers B, C, D
 # ============================================================================
 
-if [ "$START_PHASE" -le 2 ]; then
+if [ "$START_PHASE" -le 2 ] && [ "$END_PHASE" -ge 2 ]; then
     log_phase 2 "Parallel workers (3) — Infrastructure, UI, Markdown+Panes"
 
     create_worktree "infra"
@@ -491,7 +509,7 @@ fi
 # Phase 3: Merge Phase 2 Results
 # ============================================================================
 
-if [ "$START_PHASE" -le 3 ]; then
+if [ "$START_PHASE" -le 3 ] && [ "$END_PHASE" -ge 3 ]; then
     log_phase 3 "Merging phase 2 workers into main"
 
     # Merge in dependency order: infra first (other code may reference its types)
@@ -520,7 +538,7 @@ fi
 # Phase 4: Parallel Workers E, F, G
 # ============================================================================
 
-if [ "$START_PHASE" -le 4 ]; then
+if [ "$START_PHASE" -le 4 ] && [ "$END_PHASE" -ge 4 ]; then
     log_phase 4 "Parallel workers (3) — Features, Panes, Login"
 
     create_worktree "features"
@@ -540,7 +558,7 @@ fi
 # Phase 5: Final Merge + Verification
 # ============================================================================
 
-if [ "$START_PHASE" -le 5 ]; then
+if [ "$START_PHASE" -le 5 ] && [ "$END_PHASE" -ge 5 ]; then
     log_phase 5 "Final merge + verification"
 
     merge_worker "features"

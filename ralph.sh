@@ -283,7 +283,7 @@ while [ $ITERATION -lt $MAX_ITERATIONS ]; do
 
             # Commit worker's completed work
             if [ -n "$WORKER_NAME" ]; then
-                git add -A
+                git add -A -- ':!target/' ':!ralph_log*' ':!.ralph_status*'
                 git commit -m "Worker ${WORKER_NAME}: complete tasks ${TASK_LIST}
 
 Tasks: ${TASK_LIST}
@@ -311,7 +311,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>" || true
 
     # Commit progress after each iteration (worker mode only)
     if [ -n "$WORKER_NAME" ]; then
-        git add -A 2>/dev/null || true
+        git add -A -- ':!target/' ':!ralph_log*' ':!.ralph_status*' 2>/dev/null || true
         git commit -m "Worker ${WORKER_NAME}: iteration ${ITERATION} progress
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>" 2>/dev/null || true
