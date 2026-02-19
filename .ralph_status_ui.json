@@ -1,9 +1,0 @@
-{
-  "worker": "ui",
-  "tasks": "12,13,14,15,16,17,18,19,20",
-  "status": "running",
-  "iteration": 1,
-  "max_iterations": 30,
-  "timestamp": "2026-02-19T10:29:51Z",
-  "detail": "iteration 1"
-}
