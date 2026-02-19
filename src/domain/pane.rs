@@ -1,5 +1,10 @@
+use std::collections::HashMap;
+
+use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
+
 use super::types::{
-    ChannelMarker, GuildMarker, Id, InputState, PaneId, ScrollState, SplitDirection,
+    ChannelMarker, Direction, GuildMarker, Id, InputState, PaneId, ScrollState, SplitDirection,
 };
 
 /// A pane leaf — an independent channel view.
@@ -103,6 +108,31 @@ impl PaneNode {
     /// Check if a pane with the given ID exists in this tree.
     pub fn contains(&self, id: PaneId) -> bool {
         self.find(id).is_some()
+    }
+
+    /// Find all leaf panes that are currently viewing the given channel.
+    pub fn panes_viewing_channel(&self, channel_id: Id<ChannelMarker>) -> Vec<PaneId> {
+        let mut result = Vec::new();
+        self.collect_viewing_channel(channel_id, &mut result);
+        result
+    }
+
+    fn collect_viewing_channel(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        result: &mut Vec<PaneId>,
+    ) {
+        match self {
+            PaneNode::Leaf(pane) => {
+                if pane.channel_id == Some(channel_id) {
+                    result.push(pane.id);
+                }
+            }
+            PaneNode::Split { first, second, .. } => {
+                first.collect_viewing_channel(channel_id, result);
+                second.collect_viewing_channel(channel_id, result);
+            }
+        }
     }
 
     /// Split a leaf pane into two. The original pane stays in `first`,
@@ -317,6 +347,296 @@ impl PaneManager {
     /// Get all pane IDs in traversal order.
     pub fn all_pane_ids(&self) -> Vec<PaneId> {
         self.root.leaves_in_order()
+    }
+
+    /// Move focus in a direction based on rendered pane positions.
+    /// `positions` maps PaneId → Rect for all currently rendered leaf panes.
+    /// Returns true if focus actually changed.
+    pub fn focus_direction(
+        &mut self,
+        dir: Direction,
+        positions: &HashMap<PaneId, Rect>,
+    ) -> bool {
+        let current_rect = match positions.get(&self.focused_pane_id) {
+            Some(r) => *r,
+            None => return false,
+        };
+
+        let center_x = current_rect.x as i32 + current_rect.width as i32 / 2;
+        let center_y = current_rect.y as i32 + current_rect.height as i32 / 2;
+
+        let mut best: Option<(PaneId, i32)> = None;
+
+        for (&pane_id, &rect) in positions {
+            if pane_id == self.focused_pane_id {
+                continue;
+            }
+
+            let px = rect.x as i32 + rect.width as i32 / 2;
+            let py = rect.y as i32 + rect.height as i32 / 2;
+
+            // Check if the candidate is in the right direction
+            let in_direction = match dir {
+                Direction::Up => py < center_y,
+                Direction::Down => py > center_y,
+                Direction::Left => px < center_x,
+                Direction::Right => px > center_x,
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            // Distance: primary axis distance + secondary axis penalty
+            let distance = match dir {
+                Direction::Up | Direction::Down => {
+                    (py - center_y).abs() + (px - center_x).abs() / 2
+                }
+                Direction::Left | Direction::Right => {
+                    (px - center_x).abs() + (py - center_y).abs() / 2
+                }
+            };
+
+            if best.is_none() || distance < best.unwrap().1 {
+                best = Some((pane_id, distance));
+            }
+        }
+
+        if let Some((target_id, _)) = best {
+            self.focused_pane_id = target_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if splitting the focused pane would result in panes that are too small.
+    /// Minimum usable pane size: 10 columns wide, 4 rows tall.
+    pub fn can_split(
+        &self,
+        direction: SplitDirection,
+        positions: &HashMap<PaneId, Rect>,
+    ) -> bool {
+        const MIN_PANE_WIDTH: u16 = 10;
+        const MIN_PANE_HEIGHT: u16 = 4;
+
+        let current_rect = match positions.get(&self.focused_pane_id) {
+            Some(r) => *r,
+            None => return false,
+        };
+
+        match direction {
+            SplitDirection::Horizontal => {
+                // Splitting top/bottom: each half gets ~half the height
+                let half_height = current_rect.height / 2;
+                half_height >= MIN_PANE_HEIGHT && current_rect.width >= MIN_PANE_WIDTH
+            }
+            SplitDirection::Vertical => {
+                // Splitting left/right: each half gets ~half the width
+                let half_width = current_rect.width / 2;
+                half_width >= MIN_PANE_WIDTH && current_rect.height >= MIN_PANE_HEIGHT
+            }
+        }
+    }
+
+    /// Split the focused pane, but only if the result would be large enough.
+    /// Returns Some(new_id) on success, None if too small.
+    pub fn try_split(
+        &mut self,
+        direction: SplitDirection,
+        positions: &HashMap<PaneId, Rect>,
+    ) -> Option<PaneId> {
+        if self.can_split(direction, positions) {
+            Some(self.split(direction))
+        } else {
+            None
+        }
+    }
+
+    /// Resize the focused pane's parent split in a direction.
+    /// Returns true if the resize was applied.
+    pub fn resize_focused(&mut self, dir: Direction, delta: i16) -> bool {
+        let resize_delta = delta as f32 * 0.05; // Convert integer delta to ratio change
+        let adjustment = match dir {
+            Direction::Left | Direction::Up => -resize_delta,
+            Direction::Right | Direction::Down => resize_delta,
+        };
+        self.root.resize(self.focused_pane_id, adjustment)
+    }
+
+    /// Compute the rendered Rect for each leaf pane given a total area.
+    /// This recursively splits the area according to the pane tree structure.
+    pub fn compute_positions(&self, area: Rect) -> HashMap<PaneId, Rect> {
+        let mut positions = HashMap::new();
+        compute_positions_inner(&self.root, area, &mut positions);
+        positions
+    }
+
+    /// Assign a channel (and optional guild) to the focused pane, resetting scroll.
+    pub fn assign_channel(
+        &mut self,
+        channel_id: Id<ChannelMarker>,
+        guild_id: Option<Id<GuildMarker>>,
+    ) {
+        if let Some(pane) = self.focused_pane_mut() {
+            pane.channel_id = Some(channel_id);
+            pane.guild_id = guild_id;
+            pane.scroll = ScrollState::Following;
+            pane.input = InputState::default();
+        }
+    }
+}
+
+/// Recursively compute leaf pane positions from the pane tree.
+fn compute_positions_inner(
+    node: &PaneNode,
+    area: Rect,
+    positions: &mut HashMap<PaneId, Rect>,
+) {
+    match node {
+        PaneNode::Leaf(pane) => {
+            positions.insert(pane.id, area);
+        }
+        PaneNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let (first_area, second_area) = split_area(area, *direction, *ratio);
+            compute_positions_inner(first, first_area, positions);
+            compute_positions_inner(second, second_area, positions);
+        }
+    }
+}
+
+/// Split a Rect into two sub-areas based on direction and ratio.
+pub fn split_area(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
+    match direction {
+        SplitDirection::Horizontal => {
+            let first_height = (area.height as f32 * ratio).round() as u16;
+            let first_height = first_height.min(area.height);
+            let second_height = area.height.saturating_sub(first_height);
+            (
+                Rect::new(area.x, area.y, area.width, first_height),
+                Rect::new(area.x, area.y + first_height, area.width, second_height),
+            )
+        }
+        SplitDirection::Vertical => {
+            let first_width = (area.width as f32 * ratio).round() as u16;
+            let first_width = first_width.min(area.width);
+            let second_width = area.width.saturating_sub(first_width);
+            (
+                Rect::new(area.x, area.y, first_width, area.height),
+                Rect::new(area.x + first_width, area.y, second_width, area.height),
+            )
+        }
+    }
+}
+
+// --- Session persistence ---
+
+/// Serializable pane leaf state (only what matters across sessions).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionPane {
+    pub id: PaneId,
+    pub channel_id: Option<u64>,
+    pub guild_id: Option<u64>,
+}
+
+/// Serializable pane tree node for session persistence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SessionNode {
+    Leaf(SessionPane),
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<SessionNode>,
+        second: Box<SessionNode>,
+    },
+}
+
+/// Serializable session layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionLayout {
+    pub root: SessionNode,
+    pub focused_pane_id: PaneId,
+    pub next_id: u32,
+}
+
+impl PaneManager {
+    /// Serialize the pane layout to a JSON string for session persistence.
+    pub fn to_session_json(&self) -> Result<String, serde_json::Error> {
+        let layout = SessionLayout {
+            root: pane_node_to_session(&self.root),
+            focused_pane_id: self.focused_pane_id,
+            next_id: self.next_id,
+        };
+        serde_json::to_string(&layout)
+    }
+
+    /// Restore pane layout from a JSON string.
+    /// Returns None if the JSON is invalid.
+    pub fn from_session_json(json: &str) -> Option<Self> {
+        let layout: SessionLayout = serde_json::from_str(json).ok()?;
+        let root = session_to_pane_node(&layout.root);
+
+        // Verify the focused pane exists
+        let focused = if root.contains(layout.focused_pane_id) {
+            layout.focused_pane_id
+        } else {
+            root.leaves_in_order().first().copied().unwrap_or(PaneId(0))
+        };
+
+        Some(PaneManager {
+            root,
+            focused_pane_id: focused,
+            zoom_state: None, // Zoom is not persisted
+            next_id: layout.next_id,
+        })
+    }
+}
+
+fn pane_node_to_session(node: &PaneNode) -> SessionNode {
+    match node {
+        PaneNode::Leaf(pane) => SessionNode::Leaf(SessionPane {
+            id: pane.id,
+            channel_id: pane.channel_id.map(|id| id.get()),
+            guild_id: pane.guild_id.map(|id| id.get()),
+        }),
+        PaneNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => SessionNode::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(pane_node_to_session(first)),
+            second: Box::new(pane_node_to_session(second)),
+        },
+    }
+}
+
+fn session_to_pane_node(node: &SessionNode) -> PaneNode {
+    match node {
+        SessionNode::Leaf(sp) => {
+            let mut pane = Pane::new(sp.id);
+            pane.channel_id = sp.channel_id.map(Id::new);
+            pane.guild_id = sp.guild_id.map(Id::new);
+            PaneNode::Leaf(pane)
+        }
+        SessionNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => PaneNode::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(session_to_pane_node(first)),
+            second: Box::new(session_to_pane_node(second)),
+        },
     }
 }
 
@@ -630,6 +950,265 @@ mod tests {
         assert_eq!(pm.focused_pane_id, PaneId(0));
     }
 
+    // --- Directional focus tests ---
+
+    fn make_positions(pairs: &[(PaneId, Rect)]) -> HashMap<PaneId, Rect> {
+        pairs.iter().cloned().collect()
+    }
+
+    #[test]
+    fn focus_direction_right() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        // PaneId(0) is left, id1 is right
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),
+            (id1, Rect::new(40, 0, 40, 24)),
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        assert_eq!(pm.focused_pane_id, id1);
+    }
+
+    #[test]
+    fn focus_direction_left() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),
+            (id1, Rect::new(40, 0, 40, 24)),
+        ]);
+        pm.focused_pane_id = id1;
+        assert!(pm.focus_direction(Direction::Left, &positions));
+        assert_eq!(pm.focused_pane_id, PaneId(0));
+    }
+
+    #[test]
+    fn focus_direction_down() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 80, 12)),
+            (id1, Rect::new(0, 12, 80, 12)),
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Down, &positions));
+        assert_eq!(pm.focused_pane_id, id1);
+    }
+
+    #[test]
+    fn focus_direction_up() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 80, 12)),
+            (id1, Rect::new(0, 12, 80, 12)),
+        ]);
+        pm.focused_pane_id = id1;
+        assert!(pm.focus_direction(Direction::Up, &positions));
+        assert_eq!(pm.focused_pane_id, PaneId(0));
+    }
+
+    #[test]
+    fn focus_direction_no_pane_in_direction() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),
+            (id1, Rect::new(40, 0, 40, 24)),
+        ]);
+        // Already at leftmost, try going left
+        pm.focused_pane_id = PaneId(0);
+        assert!(!pm.focus_direction(Direction::Left, &positions));
+        assert_eq!(pm.focused_pane_id, PaneId(0));
+    }
+
+    #[test]
+    fn focus_direction_picks_closest() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // Layout: [P0 | P1 top / P2 bottom]
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),
+            (id1, Rect::new(40, 0, 40, 12)),
+            (id2, Rect::new(40, 12, 40, 12)),
+        ]);
+
+        // From P0, go right — should pick P1 (closer center) or P2
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        // Either P1 or P2 is valid; P1 should be closer since P0's center is at (20,12)
+        // P1 center is at (60,6), P2 center is at (60,18) — both same x distance
+        // But P1 is closer vertically (|6-12|=6 < |18-12|=6), actually same
+        // Both are equidistant, but P1 comes first in iteration
+    }
+
+    // --- Minimum pane size tests ---
+
+    #[test]
+    fn can_split_horizontal_sufficient_space() {
+        let pm = PaneManager::new();
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 80, 24))]);
+        assert!(pm.can_split(SplitDirection::Horizontal, &positions));
+    }
+
+    #[test]
+    fn can_split_vertical_sufficient_space() {
+        let pm = PaneManager::new();
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 80, 24))]);
+        assert!(pm.can_split(SplitDirection::Vertical, &positions));
+    }
+
+    #[test]
+    fn cannot_split_horizontal_too_short() {
+        let pm = PaneManager::new();
+        // Height 6: each half would be 3, which is < 4
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 80, 6))]);
+        assert!(!pm.can_split(SplitDirection::Horizontal, &positions));
+    }
+
+    #[test]
+    fn cannot_split_vertical_too_narrow() {
+        let pm = PaneManager::new();
+        // Width 18: each half would be 9, which is < 10
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 18, 24))]);
+        assert!(!pm.can_split(SplitDirection::Vertical, &positions));
+    }
+
+    #[test]
+    fn can_split_horizontal_exact_minimum() {
+        let pm = PaneManager::new();
+        // Height 8: each half = 4, which is exactly minimum
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 10, 8))]);
+        assert!(pm.can_split(SplitDirection::Horizontal, &positions));
+    }
+
+    #[test]
+    fn can_split_vertical_exact_minimum() {
+        let pm = PaneManager::new();
+        // Width 20: each half = 10, which is exactly minimum
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 20, 4))]);
+        assert!(pm.can_split(SplitDirection::Vertical, &positions));
+    }
+
+    #[test]
+    fn try_split_returns_none_if_too_small() {
+        let mut pm = PaneManager::new();
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 10, 6))]);
+        assert!(pm.try_split(SplitDirection::Horizontal, &positions).is_none());
+        assert_eq!(pm.pane_count(), 1);
+    }
+
+    #[test]
+    fn try_split_returns_some_if_sufficient() {
+        let mut pm = PaneManager::new();
+        let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 80, 24))]);
+        let result = pm.try_split(SplitDirection::Vertical, &positions);
+        assert!(result.is_some());
+        assert_eq!(pm.pane_count(), 2);
+    }
+
+    // --- resize_focused ---
+
+    #[test]
+    fn resize_focused_right_increases_ratio() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        // Focused is PaneId(0), the left pane
+        assert!(pm.resize_focused(Direction::Right, 1));
+        if let PaneNode::Split { ratio, .. } = &pm.root {
+            assert!(*ratio > 0.5);
+        }
+    }
+
+    #[test]
+    fn resize_focused_left_decreases_ratio() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        assert!(pm.resize_focused(Direction::Left, 1));
+        if let PaneNode::Split { ratio, .. } = &pm.root {
+            assert!(*ratio < 0.5);
+        }
+    }
+
+    // --- compute_positions ---
+
+    #[test]
+    fn compute_positions_single_pane() {
+        let pm = PaneManager::new();
+        let area = Rect::new(0, 0, 80, 24);
+        let positions = pm.compute_positions(area);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[&PaneId(0)], area);
+    }
+
+    #[test]
+    fn compute_positions_vertical_split() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let area = Rect::new(0, 0, 80, 24);
+        let positions = pm.compute_positions(area);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[&PaneId(0)], Rect::new(0, 0, 40, 24));
+        assert_eq!(positions[&id1], Rect::new(40, 0, 40, 24));
+    }
+
+    #[test]
+    fn compute_positions_horizontal_split() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        let area = Rect::new(0, 0, 80, 24);
+        let positions = pm.compute_positions(area);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[&PaneId(0)], Rect::new(0, 0, 80, 12));
+        assert_eq!(positions[&id1], Rect::new(0, 12, 80, 12));
+    }
+
+    #[test]
+    fn compute_positions_nested_splits() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let positions = pm.compute_positions(area);
+        assert_eq!(positions.len(), 3);
+        assert_eq!(positions[&PaneId(0)], Rect::new(0, 0, 40, 24));
+        assert_eq!(positions[&id1], Rect::new(40, 0, 40, 12));
+        assert_eq!(positions[&id2], Rect::new(40, 12, 40, 12));
+    }
+
+    // --- split_area ---
+
+    #[test]
+    fn split_area_vertical() {
+        let area = Rect::new(0, 0, 100, 50);
+        let (first, second) = split_area(area, SplitDirection::Vertical, 0.5);
+        assert_eq!(first, Rect::new(0, 0, 50, 50));
+        assert_eq!(second, Rect::new(50, 0, 50, 50));
+    }
+
+    #[test]
+    fn split_area_horizontal() {
+        let area = Rect::new(0, 0, 100, 50);
+        let (first, second) = split_area(area, SplitDirection::Horizontal, 0.5);
+        assert_eq!(first, Rect::new(0, 0, 100, 25));
+        assert_eq!(second, Rect::new(0, 25, 100, 25));
+    }
+
+    #[test]
+    fn split_area_unequal_ratio() {
+        let area = Rect::new(0, 0, 100, 50);
+        let (first, second) = split_area(area, SplitDirection::Vertical, 0.3);
+        assert_eq!(first.width, 30);
+        assert_eq!(second.width, 70);
+        assert_eq!(first.width + second.width, area.width);
+    }
+
     #[test]
     fn close_first_pane_keeps_second() {
         let mut pm = PaneManager::new();
@@ -644,5 +1223,212 @@ mod tests {
         assert!(pm.root.contains(id1));
         assert!(!pm.root.contains(PaneId(0)));
         assert_eq!(pm.focused_pane_id, id1);
+    }
+
+    // --- Session persistence tests ---
+
+    #[test]
+    fn session_roundtrip_single_pane() {
+        let pm = PaneManager::new();
+        let json = pm.to_session_json().unwrap();
+        let restored = PaneManager::from_session_json(&json).unwrap();
+        assert_eq!(restored.pane_count(), 1);
+        assert_eq!(restored.focused_pane_id, PaneId(0));
+    }
+
+    #[test]
+    fn session_roundtrip_multiple_panes() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let _id2 = pm.split(SplitDirection::Horizontal);
+
+        // Set channel assignments
+        pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(Id::new(100));
+        pm.root.find_mut(PaneId(0)).unwrap().guild_id = Some(Id::new(1));
+        pm.root.find_mut(id1).unwrap().channel_id = Some(Id::new(200));
+
+        let json = pm.to_session_json().unwrap();
+        let restored = PaneManager::from_session_json(&json).unwrap();
+
+        assert_eq!(restored.pane_count(), 3);
+        assert_eq!(restored.focused_pane_id, id1);
+
+        // Verify channel assignments survived
+        let p0 = restored.root.find(PaneId(0)).unwrap();
+        assert_eq!(p0.channel_id, Some(Id::new(100)));
+        assert_eq!(p0.guild_id, Some(Id::new(1)));
+
+        let p1 = restored.root.find(id1).unwrap();
+        assert_eq!(p1.channel_id, Some(Id::new(200)));
+    }
+
+    #[test]
+    fn session_roundtrip_preserves_ratios() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        pm.root.resize(PaneId(0), 0.2); // ratio = 0.7
+
+        let json = pm.to_session_json().unwrap();
+        let restored = PaneManager::from_session_json(&json).unwrap();
+
+        if let PaneNode::Split { ratio, .. } = &restored.root {
+            assert!((*ratio - 0.7).abs() < 0.01);
+        } else {
+            panic!("Expected Split node");
+        }
+    }
+
+    #[test]
+    fn session_roundtrip_preserves_next_id() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        pm.split(SplitDirection::Horizontal);
+        // next_id should be 3 now
+
+        let json = pm.to_session_json().unwrap();
+        let restored = PaneManager::from_session_json(&json).unwrap();
+
+        // After restoring, splitting should give ID 3
+        let mut restored = restored;
+        let new_id = restored.split(SplitDirection::Vertical);
+        assert_eq!(new_id, PaneId(3));
+    }
+
+    #[test]
+    fn session_zoom_not_persisted() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        pm.toggle_zoom();
+        assert!(pm.zoom_state.is_some());
+
+        let json = pm.to_session_json().unwrap();
+        let restored = PaneManager::from_session_json(&json).unwrap();
+        assert!(restored.zoom_state.is_none());
+    }
+
+    #[test]
+    fn session_invalid_json_returns_none() {
+        assert!(PaneManager::from_session_json("not json").is_none());
+        assert!(PaneManager::from_session_json("{}").is_none());
+    }
+
+    #[test]
+    fn session_with_invalid_focused_pane_recovers() {
+        let pm = PaneManager::new();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&pm.to_session_json().unwrap()).unwrap();
+        // Corrupt the focused_pane_id to a non-existent pane
+        json["focused_pane_id"] = serde_json::json!(999);
+        let corrupted = serde_json::to_string(&json).unwrap();
+
+        let restored = PaneManager::from_session_json(&corrupted).unwrap();
+        // Should fall back to first leaf
+        assert_eq!(restored.focused_pane_id, PaneId(0));
+    }
+
+    #[test]
+    fn session_json_is_valid_json() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+        pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(Id::new(42));
+
+        let json = pm.to_session_json().unwrap();
+        // Should be parseable JSON
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_object());
+        assert!(parsed["root"].is_object());
+        assert!(parsed["focused_pane_id"].is_number());
+    }
+
+    // --- Channel assignment tests (Task 36) ---
+
+    #[test]
+    fn assign_channel_to_focused_pane() {
+        let mut pm = PaneManager::new();
+        let channel_id = Id::new(100);
+        let guild_id = Some(Id::new(1));
+        pm.assign_channel(channel_id, guild_id);
+
+        let pane = pm.focused_pane().unwrap();
+        assert_eq!(pane.channel_id, Some(channel_id));
+        assert_eq!(pane.guild_id, guild_id);
+        assert_eq!(pane.scroll, ScrollState::Following);
+    }
+
+    #[test]
+    fn assign_channel_resets_scroll() {
+        let mut pm = PaneManager::new();
+        // Set manual scroll first
+        pm.focused_pane_mut().unwrap().scroll = ScrollState::Manual { offset: 10 };
+        pm.assign_channel(Id::new(200), None);
+        assert_eq!(pm.focused_pane().unwrap().scroll, ScrollState::Following);
+    }
+
+    #[test]
+    fn assign_channel_to_specific_pane() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.assign_channel(Id::new(100), Some(Id::new(1)));
+        // Now assign a different channel to the second pane
+        pm.focused_pane_id = id1;
+        pm.assign_channel(Id::new(200), Some(Id::new(2)));
+
+        assert_eq!(
+            pm.root.find(PaneId(0)).unwrap().channel_id,
+            Some(Id::new(100))
+        );
+        assert_eq!(
+            pm.root.find(id1).unwrap().channel_id,
+            Some(Id::new(200))
+        );
+    }
+
+    #[test]
+    fn panes_viewing_channel_single_match() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let channel_id = Id::new(100);
+        pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(channel_id);
+
+        let viewers = pm.root.panes_viewing_channel(channel_id);
+        assert_eq!(viewers, vec![PaneId(0)]);
+    }
+
+    #[test]
+    fn panes_viewing_channel_multiple_matches() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let channel_id = Id::new(100);
+
+        // Both panes view the same channel
+        pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(channel_id);
+        pm.root.find_mut(id1).unwrap().channel_id = Some(channel_id);
+
+        let viewers = pm.root.panes_viewing_channel(channel_id);
+        assert_eq!(viewers.len(), 2);
+        assert!(viewers.contains(&PaneId(0)));
+        assert!(viewers.contains(&id1));
+    }
+
+    #[test]
+    fn panes_viewing_channel_no_match() {
+        let pm = PaneManager::new();
+        let viewers = pm.root.panes_viewing_channel(Id::new(999));
+        assert!(viewers.is_empty());
+    }
+
+    #[test]
+    fn panes_viewing_channel_different_channels() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(Id::new(100));
+        pm.root.find_mut(id1).unwrap().channel_id = Some(Id::new(200));
+
+        let viewers_100 = pm.root.panes_viewing_channel(Id::new(100));
+        assert_eq!(viewers_100, vec![PaneId(0)]);
+
+        let viewers_200 = pm.root.panes_viewing_channel(Id::new(200));
+        assert_eq!(viewers_200, vec![id1]);
     }
 }

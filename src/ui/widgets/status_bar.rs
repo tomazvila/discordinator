@@ -68,6 +68,31 @@ impl<'a> StatusBar<'a> {
             ratatui::style::Style::default().fg(theme.status_mode_fg),
         )
     }
+
+    fn zoom_indicator(&self) -> Option<Span<'static>> {
+        if self.state.pane_manager.zoom_state.is_some() {
+            let theme = &self.state.theme;
+            Some(Span::styled(
+                "[ZOOM]",
+                ratatui::style::Style::default().fg(theme.status_mode_fg),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn pane_count_indicator(&self) -> Option<Span<'static>> {
+        let count = self.state.pane_manager.pane_count();
+        if count > 1 {
+            let theme = &self.state.theme;
+            Some(Span::styled(
+                format!("[{} panes]", count),
+                ratatui::style::Style::default().fg(theme.status_bar_fg),
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 impl Widget for StatusBar<'_> {
@@ -84,8 +109,10 @@ impl Widget for StatusBar<'_> {
         let conn = self.connection_indicator();
         let channel = self.channel_info();
         let mode = self.mode_indicator();
+        let zoom = self.zoom_indicator();
+        let pane_count = self.pane_count_indicator();
 
-        // Build the line: " connection | channel info          [MODE] "
+        // Build the line: " connection | channel info          [2 panes] [ZOOM] [MODE] "
         let separator = Span::styled(" │ ", style);
 
         let line = Line::from(vec![
@@ -99,12 +126,24 @@ impl Widget for StatusBar<'_> {
         let line_width: u16 = line.width() as u16;
         buf.set_line(area.x, area.y, &line, area.width);
 
-        // Render mode indicator right-aligned
-        let mode_width = mode.width() as u16 + 1; // +1 for trailing space
-        if area.width > mode_width + line_width {
-            let mode_x = area.right() - mode_width;
-            let mode_line = Line::from(vec![mode, Span::styled(" ", style)]);
-            buf.set_line(mode_x, area.y, &mode_line, mode_width);
+        // Build right-aligned indicators: [pane_count] [ZOOM] [MODE] trailing_space
+        let mut right_spans = Vec::new();
+        if let Some(pc) = pane_count {
+            right_spans.push(pc);
+            right_spans.push(Span::styled(" ", style));
+        }
+        if let Some(z) = zoom {
+            right_spans.push(z);
+            right_spans.push(Span::styled(" ", style));
+        }
+        right_spans.push(mode);
+        right_spans.push(Span::styled(" ", style));
+
+        let right_line = Line::from(right_spans);
+        let right_width = right_line.width() as u16;
+        if area.width > right_width + line_width {
+            let right_x = area.right() - right_width;
+            buf.set_line(right_x, area.y, &right_line, right_width);
         }
     }
 }
@@ -265,5 +304,42 @@ mod tests {
         let buf = render_status_bar(&state);
         let text = buffer_text(&buf);
         assert!(text.contains("DM: friend"), "text was: {}", text);
+    }
+
+    #[test]
+    fn renders_zoom_indicator_when_zoomed() {
+        let mut state = test_state();
+        state.pane_manager.split(SplitDirection::Vertical);
+        state.pane_manager.toggle_zoom();
+
+        let buf = render_status_bar(&state);
+        let text = buffer_text(&buf);
+        assert!(text.contains("[ZOOM]"), "text was: {}", text);
+    }
+
+    #[test]
+    fn no_zoom_indicator_when_not_zoomed() {
+        let state = test_state();
+        let buf = render_status_bar(&state);
+        let text = buffer_text(&buf);
+        assert!(!text.contains("[ZOOM]"), "text was: {}", text);
+    }
+
+    #[test]
+    fn renders_pane_count_when_multiple_panes() {
+        let mut state = test_state();
+        state.pane_manager.split(SplitDirection::Vertical);
+
+        let buf = render_status_bar(&state);
+        let text = buffer_text(&buf);
+        assert!(text.contains("[2 panes]"), "text was: {}", text);
+    }
+
+    #[test]
+    fn no_pane_count_for_single_pane() {
+        let state = test_state();
+        let buf = render_status_bar(&state);
+        let text = buffer_text(&buf);
+        assert!(!text.contains("panes]"), "text was: {}", text);
     }
 }

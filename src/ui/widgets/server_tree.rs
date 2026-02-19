@@ -6,7 +6,8 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::{AppState, DiscordCache, SidebarState};
+use crate::app::{AppState, SidebarState};
+use crate::domain::cache::DiscordCache;
 use crate::domain::types::*;
 use crate::ui::theme::Theme;
 
