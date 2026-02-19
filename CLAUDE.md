@@ -1,38 +1,26 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
+
+## Project Overview
+
+Discordinator is a Discord TUI client written in Rust with tmux-like split pane support. It uses the Discord User API (selfbot approach) with anti-detection measures.
 
 ## Feature Implementation
 
 **Before implementing any new feature, read `REQUIREMENTS.md` for specifications:**
 
-- Feature checklists and phased implementation (Phase 1 MVP, Phase 2 Enhanced, Phase 3 Future)
-- Data model definitions (entities, fields, relationships)
-- API endpoint specifications
-- Visibility and privacy rules
-- User roles and permissions
-- Security requirements
+- Ralph Tasks (numbered, atomic) define the implementation order
+- Anti-Detection Strategy section is **mandatory** for all Discord API interactions
+- DM Safety Policy: **NEVER** call `POST /users/@me/channels`
+- Phase ordering: P1 (Core MVP) -> P2 (Panes) -> P3 (Enhanced) -> P4 (Power User)
 
 When implementing a feature:
-1. Find the feature in `REQUIREMENTS.md` and understand its full specification
-2. Follow the data model definitions for entity structure
-3. Use the API design patterns specified
-4. Implement visibility/privacy rules as documented
-5. Mark the feature checkbox in `REQUIREMENTS.md` when complete
-
-## Codemaps
-
-**Before making changes, read the relevant codemap(s) in `.codemaps/` to understand the architecture:**
-
-- `.codemaps/overview.md` - System architecture, component interactions, request flows
-- `.codemaps/backend.md` - Backend layers, API endpoints, services, entity relationships
-- `.codemaps/frontend.md` - Component tree, state management, API client patterns
-- `.codemaps/image-worker.md` - Async processing pipeline, RabbitMQ configuration
-
-When working on a feature or bug:
-1. Read `overview.md` first for context
-2. Read the component-specific codemap (backend/frontend/image-worker)
-3. Follow the patterns and conventions documented there
+1. Find the task in `REQUIREMENTS.md` and understand its full specification
+2. Write failing tests first (TDD)
+3. Implement minimum code to pass tests
+4. Run `cargo test` and `cargo clippy -- -D warnings`
+5. Mark the checkbox in `REQUIREMENTS.md` when complete
 
 ## Test-Driven Development (Required)
 
@@ -45,31 +33,57 @@ When working on a feature or bug:
 
 Do not implement code without a corresponding failing test first.
 
-## Project Overview
-
 ## Development Commands
 
-Everything MUST be done in `nix develop` enviroment enabled by nix flake. Not a single dependency must be installed globally in this machine.
+Everything MUST be done in `nix develop` environment enabled by nix flake. Not a single dependency must be installed globally.
 
-### Infrastructure
-
-### Backend
-
-### E2E Tests
-
-### Full Stack Start Order
+```bash
+nix develop                          # Enter dev environment
+cargo build                          # Build
+cargo test                           # Run tests
+cargo test -- --nocapture            # Run tests verbose
+cargo clippy -- -D warnings          # Lint
+cargo fmt --check                    # Format check
+RUST_LOG=debug cargo run             # Run with debug logging
+```
 
 ## Architecture
 
-### Backend Structure
+- **Event loop**: `tokio::select!` hub over terminal events, gateway events, and 60 FPS render tick
+- **Pane system**: Binary tree (PaneNode::Leaf | PaneNode::Split), unlimited panes
+- **Storage**: SQLite at `~/.local/share/discordinator/messages.db` for message persistence
+- **Config**: TOML at `~/.config/discordinator/config.toml` (XDG compliant)
+- **Sidebar**: Toggleable fixed element (not part of pane tree), toggle with `Ctrl+b s`
 
-### Key Patterns
+## Key Libraries
+
+| Crate | Purpose |
+|-------|---------|
+| ratatui 0.30.0 | TUI framework |
+| twilight-gateway 0.17.1 | Discord WebSocket gateway |
+| twilight-http 0.17.1 | Discord REST API |
+| twilight-model 0.17.x | Discord data types |
+| rusqlite | SQLite database |
+| keyring 3.6.x | Secure token storage |
+| color-eyre | Error handling + panic recovery |
+| tracing | Structured logging to file |
+
+## Anti-Detection (Critical)
+
+All Discord API interactions MUST:
+1. Use IDENTIFY properties mimicking the web client (configurable in config.toml)
+2. Set `X-Super-Properties`, `User-Agent`, `X-Discord-Locale` headers on HTTP requests
+3. Never call `POST /users/@me/channels` (use DM channels from READY event)
+4. Respect rate limits (twilight-http handles this, but add request jitter)
+5. Use zstd transport compression on gateway (twilight default)
 
 ## Testing
 
+- Unit tests: markdown parser, pane tree, cache, config, SQLite, keybindings
+- Integration tests: mock Discord gateway + HTTP server in `tests/mock_discord/`
+- All tests run with: `cargo test`
+
 ## Environment
 
-Uses Nix flakes for reproducible dev environment. The `flake.nix` is located at the project root level.
-
-## Key Entities
-
+Uses Nix flakes for reproducible dev environment. The `flake.nix` is at project root.
+Rust toolchain provided via `rust-overlay` (stable latest, currently 1.93.1).

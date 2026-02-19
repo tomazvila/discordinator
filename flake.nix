@@ -23,14 +23,17 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [
+          nativeBuildInputs = [
             rustToolchain
             pkgs.pkg-config
+          ];
+
+          buildInputs = [
             pkgs.openssl
+            pkgs.sqlite
             pkgs.jq
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            pkgs.darwin.apple_sdk.frameworks.Security
-            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+            pkgs.libiconv
           ];
 
           shellHook = ''
