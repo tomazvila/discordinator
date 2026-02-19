@@ -6,7 +6,8 @@ use ratatui::{
     widgets::Widget,
 };
 
-use crate::app::{AppState, DiscordCache};
+use crate::app::AppState;
+use crate::domain::cache::DiscordCache;
 use crate::domain::types::InputState;
 use crate::input::mode::InputMode;
 use crate::ui::theme::Theme;

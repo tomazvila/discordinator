@@ -61,6 +61,8 @@ fn handle_command_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
 }
 
 fn handle_pane_prefix_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     let action = match key.code {
         // Pane operations
         KeyCode::Char('"') => Some(Action::SplitPane(SplitDirection::Horizontal)),
@@ -69,6 +71,12 @@ fn handle_pane_prefix_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
         KeyCode::Char('o') => Some(Action::FocusNextPane),
         KeyCode::Char('z') => Some(Action::ToggleZoom),
         KeyCode::Char('s') => Some(Action::ToggleSidebar),
+
+        // Ctrl+Arrow → resize pane, plain Arrow → directional focus
+        KeyCode::Up if has_ctrl => Some(Action::ResizePane(Direction::Up, 1)),
+        KeyCode::Down if has_ctrl => Some(Action::ResizePane(Direction::Down, 1)),
+        KeyCode::Left if has_ctrl => Some(Action::ResizePane(Direction::Left, 1)),
+        KeyCode::Right if has_ctrl => Some(Action::ResizePane(Direction::Right, 1)),
 
         // Directional focus (plain arrows)
         KeyCode::Up => Some(Action::FocusPaneDirection(Direction::Up)),
@@ -263,5 +271,35 @@ mod tests {
         // Any key in pane prefix goes back to normal
         let (_, mode) = handle_key_event(key(KeyCode::Char('?')), InputMode::PanePrefix);
         assert_eq!(mode, InputMode::Normal);
+    }
+
+    fn ctrl_arrow(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn pane_prefix_ctrl_arrows_resize() {
+        let (action, mode) = handle_key_event(ctrl_arrow(KeyCode::Up), InputMode::PanePrefix);
+        assert_eq!(action, Some(Action::ResizePane(Direction::Up, 1)));
+        assert_eq!(mode, InputMode::Normal);
+
+        let (action, mode) = handle_key_event(ctrl_arrow(KeyCode::Down), InputMode::PanePrefix);
+        assert_eq!(action, Some(Action::ResizePane(Direction::Down, 1)));
+        assert_eq!(mode, InputMode::Normal);
+
+        let (action, mode) = handle_key_event(ctrl_arrow(KeyCode::Left), InputMode::PanePrefix);
+        assert_eq!(action, Some(Action::ResizePane(Direction::Left, 1)));
+        assert_eq!(mode, InputMode::Normal);
+
+        let (action, mode) = handle_key_event(ctrl_arrow(KeyCode::Right), InputMode::PanePrefix);
+        assert_eq!(action, Some(Action::ResizePane(Direction::Right, 1)));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn pane_prefix_plain_arrow_still_focuses() {
+        // Verify plain arrows still do focus, not resize
+        let (action, _) = handle_key_event(key(KeyCode::Up), InputMode::PanePrefix);
+        assert_eq!(action, Some(Action::FocusPaneDirection(Direction::Up)));
     }
 }

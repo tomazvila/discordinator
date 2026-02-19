@@ -1,4 +1,3 @@
-use std::collections::{HashMap, VecDeque};
 use std::io;
 
 use color_eyre::eyre::Result;
@@ -10,6 +9,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::config::AppConfig;
+use crate::domain::cache::DiscordCache;
+use crate::domain::pane::PaneManager;
 use crate::domain::types::*;
 use crate::input::handler::handle_key_event;
 use crate::input::mode::InputMode;
@@ -51,42 +52,6 @@ impl PaneState {
     }
 }
 
-/// In-memory Discord cache. Minimal version for UI tasks.
-/// Task 10 (other worker) will flesh this out fully.
-#[derive(Debug, Clone, Default)]
-pub struct DiscordCache {
-    pub guilds: HashMap<Id<GuildMarker>, CachedGuild>,
-    pub channels: HashMap<Id<ChannelMarker>, CachedChannel>,
-    pub users: HashMap<Id<UserMarker>, CachedUser>,
-    pub guild_order: Vec<Id<GuildMarker>>,
-    pub messages: HashMap<Id<ChannelMarker>, VecDeque<CachedMessage>>,
-    pub typing: HashMap<Id<ChannelMarker>, Vec<(Id<UserMarker>, std::time::Instant)>>,
-    pub channel_guild: HashMap<Id<ChannelMarker>, Id<GuildMarker>>,
-    pub read_states: HashMap<Id<ChannelMarker>, ReadState>,
-    pub dm_channels: Vec<Id<ChannelMarker>>,
-}
-
-impl DiscordCache {
-    pub fn resolve_user_name(&self, id: Id<UserMarker>) -> String {
-        self.users
-            .get(&id)
-            .map(|u| {
-                u.display_name
-                    .as_deref()
-                    .unwrap_or(&u.name)
-                    .to_string()
-            })
-            .unwrap_or_else(|| format!("Unknown({})", id.get()))
-    }
-
-    pub fn resolve_channel_name(&self, id: Id<ChannelMarker>) -> String {
-        self.channels
-            .get(&id)
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| format!("Unknown({})", id.get()))
-    }
-}
-
 /// Top-level application state. Owned exclusively by the main loop.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -94,9 +59,11 @@ pub struct AppState {
     pub cache: DiscordCache,
     pub connection: ConnectionState,
 
-    // UI state
+    // UI state — flat pane list (used by existing UI code)
     pub panes: Vec<PaneState>,
     pub focused_pane: usize,
+    // Pane tree manager (used by pane_renderer for split pane rendering)
+    pub pane_manager: PaneManager,
     pub sidebar: SidebarState,
     pub sidebar_visible: bool,
 
@@ -126,6 +93,7 @@ impl AppState {
             connection: ConnectionState::Disconnected,
             panes: vec![PaneState::new(PaneId(0))],
             focused_pane: 0,
+            pane_manager: PaneManager::new(),
             sidebar: SidebarState::default(),
             sidebar_visible,
             input_mode: InputMode::Normal,
@@ -296,11 +264,14 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         // Navigation
         Action::SwitchChannel(channel_id) => {
             let guild_id = state.cache.channel_guild.get(&channel_id).copied();
+            // Update flat pane list (legacy)
             let pane = state.focused_pane_mut();
             pane.channel_id = Some(channel_id);
             pane.guild_id = guild_id;
             pane.scroll = ScrollState::Following;
             pane.selected_message = None;
+            // Update pane tree manager
+            state.pane_manager.assign_channel(channel_id, guild_id);
             true
         }
 
@@ -770,5 +741,44 @@ mod tests {
         // End
         app.handle_terminal_event(key(KeyCode::End));
         assert_eq!(app.state.focused_pane().input.cursor_pos, 3);
+    }
+
+    #[test]
+    fn switch_channel_updates_pane_manager() {
+        let mut state = test_state();
+        let channel_id = Id::new(10);
+        let guild_id = Id::new(1);
+        state.cache.channel_guild.insert(channel_id, guild_id);
+
+        apply_action(Action::SwitchChannel(channel_id), &mut state);
+
+        // pane_manager's focused pane should also be updated
+        let pane = state.pane_manager.focused_pane().unwrap();
+        assert_eq!(pane.channel_id, Some(channel_id));
+        assert_eq!(pane.guild_id, Some(guild_id));
+    }
+
+    #[test]
+    fn multi_pane_different_channels() {
+        let mut state = test_state();
+        let ch1 = Id::new(10);
+        let ch2 = Id::new(20);
+        state.cache.channel_guild.insert(ch1, Id::new(1));
+        state.cache.channel_guild.insert(ch2, Id::new(2));
+
+        // Assign channel 1 to first pane
+        apply_action(Action::SwitchChannel(ch1), &mut state);
+
+        // Split and assign channel 2 to second pane
+        let new_id = state.pane_manager.split(SplitDirection::Vertical);
+        state.pane_manager.focused_pane_id = new_id;
+        state.pane_manager.assign_channel(ch2, Some(Id::new(2)));
+
+        // Verify each pane has its own channel
+        let viewers_ch1 = state.pane_manager.root.panes_viewing_channel(ch1);
+        let viewers_ch2 = state.pane_manager.root.panes_viewing_channel(ch2);
+        assert_eq!(viewers_ch1.len(), 1);
+        assert_eq!(viewers_ch2.len(), 1);
+        assert_ne!(viewers_ch1[0], viewers_ch2[0]);
     }
 }

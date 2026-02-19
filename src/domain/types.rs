@@ -11,7 +11,7 @@ pub const MAX_CACHED_MESSAGES_PER_CHANNEL: usize = 200;
 
 /// Newtype for pane IDs - prevents mixing with Discord IDs.
 /// Discord IDs are Id<T> (NonZeroU64), PaneId is u32 - completely disjoint types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub u32);
 
 /// Connection state machine - makes impossible states unrepresentable.
@@ -133,7 +133,7 @@ pub enum Direction {
 }
 
 /// Pane split direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDirection {
     Horizontal,
     Vertical,
