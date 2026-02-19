@@ -268,7 +268,6 @@ pub fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn default_config_has_expected_values() {

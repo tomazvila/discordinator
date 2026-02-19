@@ -1,6 +1,8 @@
 use color_eyre::eyre::Result;
 
 #[allow(dead_code)]
+mod auth;
+#[allow(dead_code)]
 mod config;
 mod domain;
 #[allow(dead_code)]
