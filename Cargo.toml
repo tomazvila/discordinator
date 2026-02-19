@@ -51,6 +51,10 @@ base64 = "0.22"
 # QR code
 qrcode = "0.14"
 
+# RSA for QR auth protocol
+rsa = "0.9"
+sha2 = "0.10"
+
 # Random (for jitter)
 rand = "0.8"
 
