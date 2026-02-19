@@ -1,14 +1,20 @@
 use color_eyre::eyre::Result;
 
 #[allow(dead_code)]
+mod app;
+#[allow(dead_code)]
 mod config;
+#[allow(dead_code)]
 mod domain;
 #[allow(dead_code)]
 mod infrastructure;
+#[allow(dead_code)]
 mod input;
 #[allow(dead_code)]
 mod logging;
+#[allow(dead_code)]
 mod markdown;
+#[allow(dead_code)]
 mod ui;
 
 #[tokio::main]
