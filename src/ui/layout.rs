@@ -319,6 +319,7 @@ mod tests {
             message_reference: None,
             mention_everyone: false,
             mentions: vec![],
+            rendered: None,
         });
         state.cache.messages.insert(channel_id, messages);
         state.cache.users.insert(

@@ -223,6 +223,7 @@ mod tests {
             message_reference: None,
             mention_everyone: false,
             mentions: vec![],
+            rendered: None,
         }
     }
 

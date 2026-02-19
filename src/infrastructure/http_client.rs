@@ -451,6 +451,7 @@ fn json_to_cached_message(
         message_reference,
         mention_everyone,
         mentions,
+        rendered: None,
     })
 }
 
