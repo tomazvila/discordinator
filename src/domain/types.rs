@@ -200,6 +200,15 @@ pub enum Action {
     ToggleSidebar,
     ToggleCommandPalette,
 
+    // Message interaction
+    StartReply,
+    StartEdit,
+    StartDelete,
+    ConfirmDelete,
+    CancelDelete,
+    SelectMessageUp,
+    SelectMessageDown,
+
     // System
     Quit,
     ForceQuit,
@@ -469,10 +478,17 @@ mod tests {
             Action::SwapPane(Direction::Right),
             Action::ToggleSidebar,
             Action::ToggleCommandPalette,
+            Action::StartReply,
+            Action::StartEdit,
+            Action::StartDelete,
+            Action::ConfirmDelete,
+            Action::CancelDelete,
+            Action::SelectMessageUp,
+            Action::SelectMessageDown,
             Action::Quit,
             Action::ForceQuit,
         ];
-        assert_eq!(actions.len(), 24);
+        assert_eq!(actions.len(), 31);
     }
 
     #[test]
