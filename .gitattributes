@@ -1,0 +1,11 @@
+# Auto-resolve mod.rs merge conflicts (purely additive pub mod lines)
+src/domain/mod.rs merge=union
+src/infrastructure/mod.rs merge=union
+src/ui/mod.rs merge=union
+src/ui/widgets/mod.rs merge=union
+src/input/mod.rs merge=union
+src/markdown/mod.rs merge=union
+src/utils/mod.rs merge=union
+
+# Cargo.lock should be regenerated after merge, not manually resolved
+Cargo.lock -merge
