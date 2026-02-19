@@ -49,9 +49,11 @@ RUST_LOG=debug cargo run             # Run with debug logging
 
 ## Architecture
 
-- **Event loop**: `tokio::select!` hub over terminal events, gateway events, and 60 FPS render tick
-- **Pane system**: Binary tree (PaneNode::Leaf | PaneNode::Split), unlimited panes
-- **Storage**: SQLite at `~/.local/share/discordinator/messages.db` for message persistence
+- **Clean Architecture**: domain (types, cache, pane tree) → application (app, action dispatcher) → infrastructure (gateway, HTTP, SQLite) → presentation (UI, input)
+- **Event loop**: `tokio::select!` hub with biased polling (gateway priority), dirty flag rendering
+- **No Arc<Mutex>**: Main loop owns all state exclusively. Background tasks communicate via mpsc channels.
+- **Pane system**: Binary tree (PaneNode::Leaf | PaneNode::Split), unlimited panes, PaneId(u32) newtype
+- **Storage**: SQLite at `~/.local/share/discordinator/messages.db` via `spawn_blocking` (never block event loop)
 - **Config**: TOML at `~/.config/discordinator/config.toml` (XDG compliant)
 - **Sidebar**: Toggleable fixed element (not part of pane tree), toggle with `Ctrl+b s`
 
@@ -60,10 +62,11 @@ RUST_LOG=debug cargo run             # Run with debug logging
 | Crate | Purpose |
 |-------|---------|
 | ratatui 0.30.0 | TUI framework |
-| twilight-gateway 0.17.1 | Discord WebSocket gateway |
-| twilight-http 0.17.1 | Discord REST API |
-| twilight-model 0.17.x | Discord data types |
-| rusqlite | SQLite database |
+| tokio-tungstenite | Custom Discord gateway (NOT twilight-gateway — it's bot-only) |
+| reqwest | Custom Discord HTTP client (NOT twilight-http — it adds `Bot ` prefix) |
+| twilight-model 0.17.x | Discord data types only (Id<T>, Message, Channel, Guild, etc.) |
+| flate2 | zlib-stream decompression for gateway |
+| rusqlite | SQLite database (via spawn_blocking) |
 | keyring 3.6.x | Secure token storage |
 | color-eyre | Error handling + panic recovery |
 | tracing | Structured logging to file |
@@ -71,19 +74,20 @@ RUST_LOG=debug cargo run             # Run with debug logging
 ## Anti-Detection (Critical)
 
 All Discord API interactions MUST:
-1. Use IDENTIFY properties mimicking the web client (configurable in config.toml)
-2. Set `X-Super-Properties`, `User-Agent`, `X-Discord-Locale` headers on HTTP requests
-3. Never call `POST /users/@me/channels` (use DM channels from READY event)
-4. Respect rate limits (twilight-http handles this, but add request jitter)
-5. Use zstd transport compression on gateway (twilight default)
+1. Use IDENTIFY properties mimicking the web client (configurable in config.toml) — custom gateway sends these directly
+2. Set `X-Super-Properties`, `User-Agent`, `X-Discord-Locale` headers on ALL HTTP requests — custom reqwest client adds these
+3. Never call `POST /users/@me/channels` (use DM channels from READY event) — the method does not exist on HttpClient
+4. Respect rate limits (custom per-route rate limiter in HTTP actor, 50-150ms jitter)
+5. Use zlib-stream transport compression on gateway (flate2, persistent decompressor state)
 
 ## Testing
 
-- Unit tests: markdown parser, pane tree, cache, config, SQLite, keybindings
+- Unit tests: markdown parser, pane tree, cache, config, SQLite, keybindings, gateway connection, HTTP headers
 - Integration tests: mock Discord gateway + HTTP server in `tests/mock_discord/`
 - All tests run with: `cargo test`
+- 40 atomic Ralph tasks (Tasks 1-40) in REQUIREMENTS.md
 
 ## Environment
 
 Uses Nix flakes for reproducible dev environment. The `flake.nix` is at project root.
-Rust toolchain provided via `rust-overlay` (stable latest, currently 1.93.1).
+Rust toolchain provided via `rust-overlay` (stable latest).

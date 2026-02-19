@@ -24,83 +24,158 @@ Build a fully functional Discord TUI client in Rust with tmux-like pane manageme
 
 ## Technology Stack
 
-| Component | Version | Rationale |
-|-----------|---------|-----------|
+### Critical: Why Not twilight-gateway / twilight-http
+
+twilight-gateway and twilight-http are **bot-only** libraries. They cannot be used for user account (selfbot) clients:
+
+1. **twilight-gateway** hardcodes IDENTIFY `properties` to `"twilight.rs"` with no public API to override. User clients must send browser-mimicking properties to avoid detection.
+2. **twilight-gateway** requires `Intents` in the IDENTIFY payload. User accounts do not use intents.
+3. **twilight-gateway** expects bot-format READY payloads. User READY events include additional fields (`guild_folders`, `read_states`, `relationships`, `private_channels`, `user_settings`) that twilight ignores/discards.
+4. **twilight-http** prepends `Bot ` to Authorization headers. User tokens must be sent without any prefix.
+
+**Solution**: Build custom gateway (tokio-tungstenite) and HTTP client (reqwest) like Oxicord does. Keep **twilight-model** for shared data types only (Id<T>, Message, Channel, Guild, User, Event structs).
+
+### Stack
+
+| Component | Crate / Version | Rationale |
+|-----------|-----------------|-----------|
 | Language | Rust 2021 edition | Performance, safety, strong async ecosystem |
 | TUI Framework | ratatui 0.30.0 | Best Rust TUI, modularized workspace, Layout system for split panes |
-| Terminal Backend | crossterm (via ratatui-crossterm) | Cross-platform (Linux, macOS, Windows), bundled with ratatui 0.30 |
-| Discord Gateway | twilight-gateway 0.17.1 | Modular, async Stream-based, zstd compression default, MSRV 1.89 |
-| Discord HTTP | twilight-http 0.17.1 | Built-in rate limiting, brotli decompression, MSRV 1.89 |
-| Discord Models | twilight-model 0.17.x | Type-safe Discord data structures |
-| Discord Cache | twilight-cache-inmemory 0.17.x | In-process cache for guilds/channels/users |
-| Async Runtime | tokio 1.x | Required by both ratatui and twilight |
-| Database | rusqlite 0.32.x + r2d2 | SQLite for local message persistence and session storage |
-| Serialization | serde 1.x + serde_json 1.x | Standard Rust serialization |
+| Terminal Backend | crossterm (via ratatui-crossterm) | Cross-platform, bundled with ratatui 0.30 |
+| Discord Models | twilight-model 0.17.x | Type-safe Discord data types: `Id<T>` with marker types, `Message`, `Channel`, `Guild`, `User`, `Event` |
+| WebSocket | tokio-tungstenite 0.26.x | Custom gateway: full control over IDENTIFY payload, heartbeat, zstd compression |
+| HTTP Client | reqwest 0.12.x | Custom REST client: full control over headers (no `Bot ` prefix), X-Super-Properties |
+| Async Runtime | tokio 1.x (full features) | Runtime for gateway, HTTP, terminal events |
+| Database | rusqlite 0.32.x | SQLite for message persistence, session storage (used via `spawn_blocking`) |
+| Serialization | serde 1.x + serde_json 1.x | Standard Rust serialization, gateway payload parsing |
+| Compression | flate2 (zlib-stream) | Gateway transport compression (Discord uses zlib-stream, not zstd for user accounts) |
 | Keyring | keyring 3.6.x | Secure cross-platform token storage (apple-native, sync-secret-service) |
 | Markdown | Custom parser | Discord-flavored markdown with mentions, emoji, spoilers |
 | Image Display | ratatui-image 10.0.5 | Sixel/Kitty/iTerm2/halfblocks protocol support, ratatui 0.30 compatible |
-| Text Input | Custom (built on ratatui) | tui-textarea 0.7.0 only supports ratatui 0.29; build custom input widget |
+| Text Input | Custom (built on ratatui) | tui-textarea incompatible with ratatui 0.30; build custom input widget |
 | Logging | tracing 0.1.x + tracing-subscriber 0.3.x | Structured async-aware logging to file |
 | Error Handling | color-eyre 0.6.x | Pretty error reports, backtraces, graceful terminal restore on panic |
 | Config | toml 0.8.x | TOML config file parsing |
 | Directories | dirs 6.x | XDG-compliant platform directory resolution |
+| QR Code | qrcode 0.14.x | QR code generation for remote auth login |
+| Base64 | base64 0.22.x | X-Super-Properties encoding |
 
 ---
 
 ## Architecture
 
-### High-Level Architecture
+### High-Level Architecture (Clean Architecture)
+
+The application follows a **Clean Architecture** pattern with four layers. Dependencies point inward only: presentation depends on application, application depends on domain, infrastructure implements domain interfaces.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Terminal (crossterm)               │
-├─────────────────────────────────────────────────────┤
-│                    UI Layer (ratatui)                 │
-│  ┌──────────┬──────────────┬──────────────┐         │
-│  │ Server/  │   Pane 1     │   Pane 2     │         │
-│  │ Channel  │  (messages)  │  (messages)  │         │
-│  │ Tree     ├──────────────┼──────────────┤         │
-│  │(toggle)  │   Pane 3     │   Pane 4     │         │
-│  │          │  (messages)  │  (messages)  │         │
-│  └──────────┴──────────────┴──────────────┘         │
-├─────────────────────────────────────────────────────┤
-│              Application State (AppState)            │
-│  ┌────────────┬───────────┬──────────────┐          │
-│  │ PaneManager│ GuildState│   SQLite DB  │          │
-│  └────────────┴───────────┴──────────────┘          │
-├─────────────────────────────────────────────────────┤
-│              Discord Layer (twilight)                 │
-│  ┌────────────┬───────────┬──────────────┐          │
-│  │  Gateway   │   HTTP    │    Cache     │          │
-│  │  (events)  │  (REST)   │  (in-memory) │          │
-│  └────────────┴───────────┴──────────────┘          │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   PRESENTATION LAYER                          │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │              Terminal (crossterm raw mode)             │    │
+│  ├──────────────────────────────────────────────────────┤    │
+│  │              UI Components (ratatui 0.30)             │    │
+│  │  ┌──────────┬──────────────┬──────────────┐          │    │
+│  │  │ Server/  │   Pane 1     │   Pane 2     │          │    │
+│  │  │ Channel  │  (messages)  │  (messages)  │          │    │
+│  │  │ Tree     ├──────────────┼──────────────┤          │    │
+│  │  │(toggle)  │   Pane 3     │   Pane 4     │          │    │
+│  │  │          │  (messages)  │  (messages)  │          │    │
+│  │  └──────────┴──────────────┴──────────────┘          │    │
+│  │  Input Handler (mode-aware key dispatch)              │    │
+│  └──────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────┤
+│                   APPLICATION LAYER                           │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  App (tokio::select! hub)                             │    │
+│  │  ├── handle_terminal_event()                          │    │
+│  │  ├── handle_gateway_event()                           │    │
+│  │  ├── handle_background_result()                       │    │
+│  │  └── render_if_dirty()                                │    │
+│  │  Action Dispatcher (command → state mutation)         │    │
+│  │  Background Task Coordinator (mpsc channels)          │    │
+│  └──────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────┤
+│                     DOMAIN LAYER                              │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  Domain Types (twilight-model re-exports + extensions)│    │
+│  │  ├── Id<UserMarker>, Id<ChannelMarker>, etc.          │    │
+│  │  ├── Message, Channel, Guild, User                    │    │
+│  │  ├── GatewayEvent (custom enum, user-account format)  │    │
+│  │  └── DiscordCache (HashMap-based, in-process)         │    │
+│  │  PaneTree (binary tree layout engine)                 │    │
+│  │  MarkdownAST (parsed Discord markdown)                │    │
+│  └──────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────┤
+│                  INFRASTRUCTURE LAYER                         │
+│  ┌────────────┬───────────────┬──────────────┬──────────┐   │
+│  │  Gateway   │  HTTP Client  │   SQLite DB  │  Keyring │   │
+│  │(tungstenite│  (reqwest)    │  (rusqlite)  │          │   │
+│  │ + zlib)    │  + anti-detect│  spawn_block │          │   │
+│  └────────────┴───────────────┴──────────────┴──────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Event Loop Architecture
 
-The application uses a `tokio::select!` hub pattern with three event sources:
+Single-task `tokio::select!` hub with **biased polling** (gateway events have priority over render ticks to prevent message loss under load). **Dirty flag rendering**: only re-render when state actually changed, not on every tick.
 
 ```rust
 loop {
     tokio::select! {
+        biased;  // gateway events have priority
+
+        // Discord gateway events (highest priority - never miss messages)
+        Some(event) = gateway_rx.recv() => {
+            app.dirty |= handle_gateway_event(event, &mut app.state);
+        }
+
+        // Background task results (HTTP responses, SQLite query results)
+        Some(result) = background_rx.recv() => {
+            app.dirty |= handle_background_result(result, &mut app.state);
+        }
+
         // Terminal input (keyboard, mouse, resize)
-        event = terminal_events.next() => {
-            handle_input(event, &mut app);
+        Some(event) = terminal_events.next() => {
+            app.dirty |= handle_input(event, &mut app.state);
         }
-        // Discord gateway events (messages, presence, etc.)
-        event = gateway.next() => {
-            handle_discord(event, &mut app);
-        }
-        // Render tick at 60 FPS (~16ms)
+
+        // Render tick at 60 FPS (~16ms) - only render if dirty
         _ = render_tick.tick() => {
-            terminal.draw(|f| ui(f, &app))?;
+            if app.dirty {
+                terminal.draw(|f| ui::render(f, &app.state))?;
+                app.dirty = false;
+            }
         }
     }
 }
 ```
 
-Heavy operations (HTTP requests, SQLite writes, markdown parsing) are spawned as separate tokio tasks communicating via `tokio::mpsc` channels to keep the render loop responsive.
+### Async Architecture: Channel-Based Decoupling
+
+All heavy I/O runs in background tasks, communicating results back to the main loop via `mpsc` channels. **No `Arc<Mutex<_>>`** on shared state — the main loop owns all mutable state exclusively.
+
+```
+                        ┌───────────────┐
+                        │   Main Loop   │ (owns all state)
+                        │ tokio::select!│
+                        └───┬───┬───┬───┘
+                            │   │   │
+              ┌─────────────┘   │   └─────────────┐
+              ▼                 ▼                   ▼
+    ┌─────────────────┐ ┌────────────┐   ┌──────────────────┐
+    │  Gateway Task   │ │ HTTP Actor │   │  SQLite Worker   │
+    │ (WebSocket read │ │ (reqwest   │   │ (spawn_blocking  │
+    │  + decompress   │ │  + headers │   │  in thread pool) │
+    │  + parse JSON)  │ │  + jitter) │   │                  │
+    │                 │ │            │   │                  │
+    │ → gateway_tx    │ │ → bg_tx    │   │ → bg_tx          │
+    └─────────────────┘ └────────────┘   └──────────────────┘
+```
+
+- **Gateway task**: Reads WebSocket frames, decompresses zlib-stream, deserializes JSON, sends parsed events to `gateway_tx`. Runs in its own tokio task.
+- **HTTP actor**: Receives requests via `mpsc` channel, adds anti-detection headers, applies rate limiting + jitter, sends responses back via `bg_tx`. Single task handles all HTTP to ensure rate limit state is centralized.
+- **SQLite worker**: Receives queries via `mpsc` channel, executes on `spawn_blocking` thread (rusqlite is synchronous), sends results back via `bg_tx`.
 
 ### Directory Layout (XDG)
 
@@ -115,57 +190,72 @@ Heavy operations (HTTP requests, SQLite writes, markdown parsing) are spawned as
 
 ```
 src/
-├── main.rs              # Entry point, tokio runtime, panic handler
-├── app.rs               # AppState, main event loop (tokio::select!)
-├── auth.rs              # Login flow: token, email+pass+2FA, QR code
-├── config.rs            # Configuration (TOML file, XDG dirs)
-├── db.rs                # SQLite database (messages, sessions, settings)
-├── discord/
+├── main.rs                  # Entry point, tokio runtime, panic handler
+├── app.rs                   # App struct, tokio::select! hub, dirty flag
+├── action.rs                # Action enum (all state mutations go through here)
+├── auth.rs                  # Login flow: token, email+pass+2FA, QR code
+├── config.rs                # Configuration (TOML file, XDG dirs)
+│
+├── domain/                  # DOMAIN LAYER - pure types, no I/O
 │   ├── mod.rs
-│   ├── gateway.rs       # Gateway connection, event handling, anti-detection
-│   ├── http_client.rs   # REST API wrapper with anti-detection headers
-│   ├── cache.rs         # In-memory cache for guilds, channels, users
-│   └── models.rs        # App-specific model extensions
-├── ui/
+│   ├── types.rs             # Re-export twilight-model types + app-specific newtypes
+│   ├── cache.rs             # DiscordCache: HashMap-based guild/channel/user/message store
+│   ├── pane.rs              # PaneNode binary tree, PaneId, split/close/resize
+│   ├── markdown.rs          # Discord markdown AST (parser output)
+│   └── event.rs             # GatewayEvent enum (user-account format, not bot)
+│
+├── infrastructure/          # INFRASTRUCTURE LAYER - I/O, external services
 │   ├── mod.rs
-│   ├── layout.rs        # Main layout rendering
-│   ├── pane.rs          # Pane abstraction (split tree)
-│   ├── pane_manager.rs  # Pane CRUD, focus management
-│   ├── login.rs         # TUI login screen (token/email/QR)
+│   ├── gateway.rs           # Custom WebSocket gateway (tokio-tungstenite + zlib-stream)
+│   ├── http_client.rs       # Custom REST client (reqwest + anti-detection headers)
+│   ├── anti_detection.rs    # IDENTIFY properties, X-Super-Properties, header sets
+│   ├── db.rs                # SQLite database (rusqlite, spawn_blocking)
+│   └── keyring.rs           # Token storage (keyring crate wrapper)
+│
+├── ui/                      # PRESENTATION LAYER - rendering + input
+│   ├── mod.rs
+│   ├── layout.rs            # Main layout: sidebar | pane tree | status bar
+│   ├── pane_renderer.rs     # Recursive pane tree → ratatui Layout
+│   ├── login.rs             # TUI login screen (token/email/QR)
 │   ├── widgets/
 │   │   ├── mod.rs
 │   │   ├── server_tree.rs   # Server/channel tree sidebar (toggleable)
-│   │   ├── message_view.rs  # Message list display
+│   │   ├── message_view.rs  # Message list with rendered markdown
 │   │   ├── input_box.rs     # Message composition (custom widget)
 │   │   ├── member_list.rs   # Member sidebar
-│   │   ├── status_bar.rs    # Bottom status bar
-│   │   └── command_palette.rs # Ctrl+P command palette
-│   └── theme.rs         # Color scheme and styling
-├── input/
+│   │   ├── status_bar.rs    # Connection, channel, mode, unread count
+│   │   └── command_palette.rs # Ctrl+P fuzzy command palette
+│   └── theme.rs             # Color scheme and styling
+│
+├── input/                   # Input handling (part of presentation)
 │   ├── mod.rs
-│   ├── handler.rs       # Key event dispatch
-│   ├── mode.rs          # Normal/Insert/Command modes (vim-like)
-│   └── keybindings.rs   # Configurable key bindings
-├── markdown/
+│   ├── handler.rs           # Key event → Action dispatch (mode-aware)
+│   ├── mode.rs              # InputMode state machine (Normal/Insert/Command/PanePrefix)
+│   └── keybindings.rs       # Configurable key bindings
+│
+├── markdown/                # Markdown processing
 │   ├── mod.rs
-│   ├── parser.rs        # Discord-flavored markdown parser
-│   └── renderer.rs      # Markdown to ratatui Spans/Lines
+│   ├── parser.rs            # Discord-flavored markdown → AST
+│   └── renderer.rs          # AST → ratatui Spans/Lines (cached per message)
+│
 └── utils/
     ├── mod.rs
-    └── unicode.rs        # Unicode width helpers
+    └── unicode.rs            # Unicode width helpers
 
 tests/
-├── mock_discord/        # Mock Discord gateway + HTTP server for testing
+├── mock_discord/            # Mock Discord gateway + HTTP for testing
 │   ├── mod.rs
-│   ├── gateway.rs       # Mock WebSocket gateway
-│   └── http.rs          # Mock REST API
-├── test_pane_tree.rs    # Pane split/close/resize/focus tests
-├── test_markdown.rs     # Markdown parser tests
-├── test_cache.rs        # Cache operations tests
-├── test_config.rs       # Config parsing tests
-├── test_db.rs           # SQLite operations tests
-├── test_keybindings.rs  # Key binding resolution tests
-└── test_integration.rs  # Full lifecycle tests with mock server
+│   ├── gateway.rs           # Mock WebSocket: HELLO → IDENTIFY → READY cycle
+│   └── http.rs              # Mock REST: message CRUD, channel history
+├── test_pane_tree.rs        # Pane split/close/resize/focus traversal
+├── test_markdown.rs         # Markdown parser edge cases
+├── test_cache.rs            # Cache operations (insert, update, lookup, eviction)
+├── test_config.rs           # Config parsing (defaults, overrides, invalid)
+├── test_db.rs               # SQLite CRUD, schema migration
+├── test_keybindings.rs      # Key binding resolution per mode
+├── test_gateway.rs          # Gateway connection, heartbeat, reconnect
+├── test_http_client.rs      # HTTP headers, rate limiting, anti-detection
+└── test_integration.rs      # Full lifecycle with mock server
 ```
 
 ### Startup Flow
@@ -173,7 +263,7 @@ tests/
 1. Initialize color-eyre panic handler (restores terminal on panic)
 2. Load config from XDG config dir (create default if missing)
 3. Initialize tracing (log to file in XDG data dir)
-4. Check for existing token (keyring -> env var -> config file)
+4. Check for existing token (keyring → env var → config file)
 5. **If no token**: Show TUI login screen (email+pass / QR code / paste token)
 6. **If token exists**: Attempt gateway connection
 7. **If token expired/invalid**: Show login screen with error message
@@ -247,17 +337,19 @@ The following endpoints are known to trigger detection and **must be avoided or 
 
 ### 4. Rate Limit Compliance
 
-- Respect all HTTP rate limit headers (`X-RateLimit-*`)
-- twilight-http handles per-route rate limiting automatically
+- Respect all HTTP rate limit headers (`X-RateLimit-*`) in the custom reqwest-based HTTP client
+- Implement per-route rate limiting (bucket tracking) since we're not using twilight-http
 - Global rate limit: stay well under 50 req/s
-- Add jitter to request timing to avoid machine-like patterns
+- Add jitter (50-150ms random delay) to request timing to avoid machine-like patterns
+- The HTTP actor centralizes all requests through a single task to maintain rate limit state
 
 ### 5. Connection Behavior
 
-- Use zstd transport compression (default in twilight-gateway, matches web client)
-- Maintain proper heartbeat intervals as provided by the gateway
-- Handle session invalidation gracefully (re-IDENTIFY, don't rapid-reconnect)
+- Use zlib-stream transport compression (this is what user accounts actually use, not zstd)
+- Implement heartbeat/ACK cycle manually (send op 1 at the interval from HELLO, track last ACK)
+- Handle session invalidation gracefully (re-IDENTIFY on invalid session, don't rapid-reconnect)
 - Use a single shard (user accounts don't shard)
+- Implement RESUME (op 6) for seamless reconnection after brief disconnects
 
 ---
 
@@ -272,7 +364,7 @@ Phase 1 builds a traditional single-view Discord client. The pane system comes i
 - [ ] TUI login form: email + password + optional 2FA code
 - [ ] QR code authentication (render QR in terminal for Discord mobile scan)
 - [ ] Secure token storage in OS keyring via `keyring` crate (apple-native on macOS, secret-service on Linux)
-- [ ] Connect to Discord gateway via WebSocket (wss://gateway.discord.gg/?v=10&encoding=json)
+- [ ] Connect to Discord gateway via WebSocket (wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream)
 - [ ] Handle heartbeat/ACK cycle (op 1/op 11)
 - [ ] Handle READY event and populate initial state (guilds, channels, user, DMs)
 - [ ] Automatic reconnection with RESUME (op 6) on disconnect
@@ -477,139 +569,192 @@ These are the concrete tasks for the Ralph loop. Each task should be completable
 ### Scaffolding (Tasks 1-5)
 
 **Task 1: Project scaffolding**
-- Create `Cargo.toml` with all dependencies
+- Create `Cargo.toml` with all dependencies (see Technology Stack: ratatui, twilight-model, tokio-tungstenite, reqwest, rusqlite, serde, flate2, keyring, color-eyre, tracing, toml, dirs, base64, qrcode)
 - Create `src/main.rs` with basic tokio entry point and color-eyre setup
+- Create module stubs: `src/domain/mod.rs`, `src/infrastructure/mod.rs`, `src/ui/mod.rs`, `src/input/mod.rs`, `src/markdown/mod.rs`
 - Verify `cargo build` succeeds in `nix develop`
 - Test: `cargo test` passes (even if no tests yet)
-- Files: `Cargo.toml`, `src/main.rs`
+- Files: `Cargo.toml`, `src/main.rs`, module stubs
 
-**Task 2: Configuration module**
+**Task 2: Domain types**
+- Create `src/domain/types.rs` with re-exports from twilight-model: `Id<UserMarker>`, `Id<ChannelMarker>`, `Id<GuildMarker>`, `Id<MessageMarker>`, `Id<RoleMarker>`, `ChannelType`
+- Define app-specific types: `PaneId(u32)`, `CachedMessage`, `CachedGuild`, `CachedChannel`, `CachedUser`, `CachedRole`, `MessageAttachment`, `MessageEmbed`, `MessageReference`, `ReadState`
+- Define `ConnectionState` enum (Disconnected/Connecting/Connected/Resuming)
+- Define `Action` enum (all state mutations)
+- Define `BackgroundResult`, `HttpRequest`, `DbRequest` enums
+- Test: type construction, PaneId distinctness from Discord IDs
+- Files: `src/domain/types.rs`, `src/domain/mod.rs`
+
+**Task 3: Configuration module**
 - Create `src/config.rs` with `AppConfig` struct
 - XDG directory resolution using `dirs` crate
 - TOML config loading with defaults
 - Create default config on first run
+- Anti-detection fields: `client_build_number`, `browser_version`, `browser_user_agent`
 - Test: parse config, missing config creates default, invalid config errors gracefully
 - Files: `src/config.rs`, `tests/test_config.rs`
 
-**Task 3: SQLite database module**
-- Create `src/db.rs` with schema initialization
-- Tables: `messages`, `channels`, `guilds`, `sessions`
-- CRUD operations for messages (insert, query by channel, update, delete)
+**Task 4: SQLite database module**
+- Create `src/infrastructure/db.rs` with schema initialization
+- Tables: `messages`, `channels`, `guilds`, `sessions` (see Database Schema in Data Models)
+- CRUD operations for messages (insert, batch insert, query by channel, update, delete)
 - Session save/load operations
-- Test: all CRUD operations, schema migration
-- Files: `src/db.rs`, `tests/test_db.rs`
+- All operations via `spawn_blocking` — never block the event loop
+- Enable WAL mode for concurrent read/write
+- Test: all CRUD operations, schema creation
+- Files: `src/infrastructure/db.rs`, `tests/test_db.rs`
 
-**Task 4: Logging setup**
+**Task 5: Error handling and logging**
+- Set up color-eyre with custom panic handler
+- Panic handler restores terminal state (disable raw mode, show cursor) before printing error
 - Configure tracing-subscriber to log to file in XDG data dir
 - Log rotation (keep last 5 log files, max 10MB each)
 - RUST_LOG env var support
-- Test: verify log file is created, messages are written
-- Files: `src/main.rs` (logging init)
-
-**Task 5: Error handling**
-- Set up color-eyre with custom panic handler
-- Panic handler restores terminal state (disable raw mode, show cursor) before printing error
-- Test: verify panic handler works (can be a manual test)
+- Test: verify log file is created
 - Files: `src/main.rs`
 
-### Discord Connection (Tasks 6-10)
+### Discord Infrastructure (Tasks 6-10)
 
 **Task 6: Anti-detection module**
-- Create `src/discord/gateway.rs` with IDENTIFY properties struct
+- Create `src/infrastructure/anti_detection.rs` with IDENTIFY properties struct
 - Configurable `client_build_number`, `browser_version`, `browser_user_agent` from config
-- X-Super-Properties base64 encoding for HTTP headers
-- Test: verify IDENTIFY payload matches expected format, X-Super-Properties encoding is correct
-- Files: `src/discord/gateway.rs`, `src/discord/mod.rs`
+- `build_identify_properties()` → JSON object matching web client format
+- `build_super_properties()` → base64-encoded JSON for X-Super-Properties header
+- `build_http_headers()` → HeaderMap with User-Agent, X-Super-Properties, X-Discord-Locale, Authorization
+- Test: verify IDENTIFY payload matches expected format, X-Super-Properties encoding is correct, headers are complete
+- Files: `src/infrastructure/anti_detection.rs`, `src/infrastructure/mod.rs`
 
-**Task 7: Gateway connection**
-- Connect to Discord gateway using twilight-gateway
-- Custom IDENTIFY with anti-detection properties
-- Heartbeat/ACK handling
-- Receive READY event and extract guilds, channels, user info, DM channels
-- Test: connect to mock gateway, verify READY handling
-- Files: `src/discord/gateway.rs`, `tests/mock_discord/mod.rs`, `tests/mock_discord/gateway.rs`
+**Task 7: Custom gateway connection**
+- Create `src/infrastructure/gateway.rs` using tokio-tungstenite (NOT twilight-gateway)
+- Connect to `wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream`
+- Receive HELLO (op 10), extract heartbeat_interval
+- Send IDENTIFY (op 2) with anti-detection properties from Task 6 (NO intents field — user accounts don't use intents)
+- Implement heartbeat/ACK cycle (op 1 send, op 11 receive) on tokio::interval
+- zlib-stream decompression (flate2): maintain decompressor state across frames, flush on `\x00\x00\xff\xff` suffix
+- Parse JSON into `GatewayEvent` enum (user-account format, see Data Models)
+- Handle READY: extract `session_id`, `resume_gateway_url`, guilds, private_channels, read_states, relationships
+- Send parsed events to `gateway_tx` channel
+- Test: connect to mock gateway, verify HELLO→IDENTIFY→READY cycle, heartbeat timing
+- Files: `src/infrastructure/gateway.rs`, `src/domain/event.rs`, `tests/mock_discord/mod.rs`, `tests/mock_discord/gateway.rs`
 
-**Task 8: HTTP client with anti-detection**
-- Create `src/discord/http_client.rs` wrapping twilight-http
-- Add anti-detection headers (User-Agent, X-Super-Properties, X-Discord-Locale) to all requests
-- Request jitter (small random delay) to avoid machine-like patterns
-- Test: verify headers are set correctly on mock HTTP server
-- Files: `src/discord/http_client.rs`, `tests/mock_discord/http.rs`
+**Task 8: Gateway reconnection and RESUME**
+- Implement RESUME (op 6) for seamless reconnection after disconnect
+- On WebSocket close: attempt RESUME with stored session_id + sequence number
+- If RESUME fails (invalid session): fall back to full re-IDENTIFY
+- Exponential backoff on repeated failures (1s, 2s, 4s, max 30s)
+- Handle op 7 (Reconnect) and op 9 (Invalid Session) from server
+- ConnectionState transitions: Connected → Resuming → Connected (or → Connecting → Connected)
+- Test: disconnect → RESUME → success, disconnect → RESUME fail → re-IDENTIFY
+- Files: `src/infrastructure/gateway.rs`
 
-**Task 9: In-memory cache**
-- Create `src/discord/cache.rs` using twilight-cache-inmemory
-- Cache guilds, channels, users, presences from gateway events
-- Helper methods: get guild name, get channel name, get user display name, resolve mention
-- Test: populate cache from mock READY event, verify lookups
-- Files: `src/discord/cache.rs`, `tests/test_cache.rs`
+**Task 9: Custom HTTP client**
+- Create `src/infrastructure/http_client.rs` using reqwest (NOT twilight-http)
+- HTTP actor pattern: runs as a single tokio task, receives requests via `mpsc` channel
+- All requests include anti-detection headers from Task 6 (no `Bot ` prefix on Authorization)
+- Per-route rate limiting: parse `X-RateLimit-*` headers, track bucket state, delay if needed
+- Request jitter: 50-150ms random delay on each request
+- Endpoints: send message, edit message, delete message, fetch message history, send typing
+- **No `create_dm_channel()` method** — the method simply does not exist, preventing accidental DM creation
+- Send results back via `bg_tx` channel as `BackgroundResult`
+- Test: verify headers on mock HTTP server, rate limit handling, jitter timing
+- Files: `src/infrastructure/http_client.rs`, `tests/mock_discord/http.rs`, `tests/test_http_client.rs`
 
-**Task 10: Authentication module**
+**Task 10: In-memory cache**
+- Create `src/domain/cache.rs` with `DiscordCache` struct
+- HashMap-based: guilds, channels, users (O(1) lookup by ID)
+- Per-channel message VecDeque with MAX_CACHED_MESSAGES_PER_CHANNEL eviction
+- Guild ordering: `guild_order: Vec<Id<GuildMarker>>` for sidebar render
+- Channel ordering per guild: `channel_order: Vec<Id<ChannelMarker>>` sorted by position
+- channel_guild reverse lookup map
+- ReadState tracking per channel
+- DM channel list from READY
+- Helper methods: `resolve_user_name(Id<UserMarker>)`, `resolve_channel_name(Id<ChannelMarker>)`, `resolve_role(Id<RoleMarker>)`
+- Populate from READY event data
+- Test: populate from mock READY, verify all lookups, message eviction at capacity
+- Files: `src/domain/cache.rs`, `tests/test_cache.rs`
+
+### Authentication (Task 11)
+
+**Task 11: Authentication module**
 - Create `src/auth.rs` with token management
-- Token sources: env var `DISCORD_TOKEN` -> keyring -> config file
-- Token validation (attempt gateway connect, check for invalid token error)
-- Store valid token in keyring
+- Token sources: env var `DISCORD_TOKEN` → keyring → config file
+- Store valid token in keyring via `src/infrastructure/keyring.rs`
+- Token validation: attempt gateway connect, check for invalid token error code
 - Test: token retrieval priority, keyring storage (mocked)
-- Files: `src/auth.rs`
+- Files: `src/auth.rs`, `src/infrastructure/keyring.rs`
 
-### UI Foundation (Tasks 11-18)
+### UI Foundation (Tasks 12-19)
 
-**Task 11: Terminal setup and main loop**
-- Create `src/app.rs` with `App` struct holding all state
+**Task 12: Terminal setup and main loop**
+- Create `src/app.rs` with `App` struct holding all state (see AppState in Data Models)
 - Set up crossterm raw mode, alternate screen
-- Main `tokio::select!` loop: terminal events + render tick (60 FPS)
+- Main `tokio::select!` loop with biased polling: gateway_rx → background_rx → terminal_events → render_tick
+- Dirty flag rendering: only `terminal.draw()` when `app.dirty == true`
 - Graceful shutdown on Ctrl+C / Ctrl+Q (restore terminal)
-- Test: app starts and stops cleanly
+- Test: app starts and stops cleanly, dirty flag prevents unnecessary renders
 - Files: `src/app.rs`, `src/main.rs`
 
-**Task 12: Input mode system**
+**Task 13: Action dispatcher**
+- Create `src/action.rs` with `Action` enum (see Data Models)
+- `apply_action(action: Action, state: &mut AppState)` function
+- Each action variant maps to a specific state mutation
+- Actions that need I/O (SendMessage, EditMessage, etc.) send to appropriate background channel
+- Test: each action produces expected state change
+- Files: `src/action.rs`
+
+**Task 14: Input mode system**
 - Create `src/input/mode.rs` with `InputMode` enum (Normal, Insert, Command, PanePrefix)
-- Create `src/input/handler.rs` with key dispatch based on mode
-- Mode transitions: `i` -> Insert, `Esc` -> Normal, `:` -> Command, `Ctrl+b` -> PanePrefix
+- Create `src/input/handler.rs` with key dispatch: event → Action based on current mode
+- Mode transitions: `i` → Insert, `Esc` → Normal, `:` → Command, `Ctrl+b` → PanePrefix
 - Test: mode transitions, key routing per mode
 - Files: `src/input/mod.rs`, `src/input/mode.rs`, `src/input/handler.rs`
 
-**Task 13: Theme and styling**
+**Task 15: Theme and styling**
 - Create `src/ui/theme.rs` with color definitions
 - Default theme matching Discord dark mode colors
 - Theme struct with all configurable colors (background, text, borders, highlight, mention, etc.)
 - Test: theme loads defaults, custom colors override
 - Files: `src/ui/theme.rs`
 
-**Task 14: Status bar widget**
+**Task 16: Status bar widget**
 - Create `src/ui/widgets/status_bar.rs`
-- Display: connection status (icon), current server > #channel, input mode, unread/mention counts
+- Display: connection status (ConnectionState → icon), current server > #channel, input mode, unread/mention counts
 - Test: renders correct content for each connection state
 - Files: `src/ui/widgets/status_bar.rs`, `src/ui/widgets/mod.rs`
 
-**Task 15: Server/channel tree widget**
+**Task 17: Server/channel tree widget**
 - Create `src/ui/widgets/server_tree.rs`
-- Render guild list with collapsible categories and channels
-- DM section from READY event data
-- Unread/mention indicators (bold, bullet, red)
+- Render guild list using `cache.guild_order` → `cache.guilds` lookups
+- Collapsible categories with channels (using `cache.guilds[id].channel_order`)
+- DM section from `cache.dm_channels`
+- Unread/mention indicators from `cache.read_states` (bold, bullet, red)
 - Arrow key / j/k navigation, Enter to select
 - Toggle visibility with keybinding
 - Test: renders tree correctly, navigation works, collapse/expand
 - Files: `src/ui/widgets/server_tree.rs`
 
-**Task 16: Message view widget**
+**Task 18: Message view widget**
 - Create `src/ui/widgets/message_view.rs`
-- Render messages with author, timestamp, content
+- Render messages from `cache.messages[channel_id]` VecDeque
+- Read from VecDeque back (newest) with scroll offset
 - Message selection highlight (for reply/edit/delete)
-- Auto-scroll to bottom on new messages (follow mode), stop auto-scroll on manual scroll up
+- Auto-scroll to bottom on new messages (ScrollState::Following), stop on manual scroll up
 - Date separator between messages from different days
+- Author name resolved via `cache.resolve_user_name()`
 - Test: renders messages, selection, auto-scroll behavior
 - Files: `src/ui/widgets/message_view.rs`
 
-**Task 17: Input box widget**
+**Task 19: Input box widget**
 - Create `src/ui/widgets/input_box.rs` (custom, not tui-textarea)
 - Single-line by default, expand to multi-line with Shift+Enter
-- Basic text editing: cursor movement, insert, delete, home/end
-- Enter to send, Esc to cancel/return to Normal mode
-- Visual feedback for reply mode (show "Replying to @user" header)
+- Basic text editing: cursor movement (byte + display column tracking), insert, delete, home/end
+- Enter produces `Action::SendMessage`, Esc produces `Action::EnterNormalMode`
+- Visual feedback for reply mode (show "Replying to @user" header from `InputState.reply_to`)
+- Visual feedback for edit mode (show "Editing message" header from `InputState.editing`)
 - Test: text insertion, cursor movement, send action
 - Files: `src/ui/widgets/input_box.rs`
 
-**Task 18: Main layout composition**
+**Task 20: Main layout composition**
 - Create `src/ui/layout.rs`
 - Compose: optional sidebar | main content | status bar
 - Sidebar width configurable, toggleable with Ctrl+b s
@@ -617,149 +762,162 @@ These are the concrete tasks for the Ralph loop. Each task should be completable
 - Test: layout renders correctly with/without sidebar
 - Files: `src/ui/layout.rs`, `src/ui/mod.rs`
 
-### Core Features (Tasks 19-25)
+### Core Features (Tasks 21-27)
 
-**Task 19: Channel switching**
-- Select channel in sidebar -> update current pane's channel
-- Fetch message history from SQLite first, then REST (newer messages)
-- Store fetched messages in SQLite
+**Task 21: Channel switching**
+- Select channel in sidebar → produces `Action::SwitchChannel(id)`
+- Action handler updates focused pane's `channel_id`
+- Pipeline: check cache.messages[channel_id] → if empty, send DbRequest::FetchMessages → then send HttpRequest::FetchMessages for newer
+- Handle BackgroundResult::CachedMessages and BackgroundResult::MessagesFetched → insert into cache
 - Update status bar with new channel info
-- Test: channel switch updates view, messages load correctly
-- Files: `src/app.rs` (event handling)
+- Test: channel switch updates view, messages load from cache and REST correctly
+- Files: `src/app.rs`, `src/action.rs`
 
-**Task 20: Message sending**
-- In Insert mode, Enter sends message content via twilight-http
-- Clear input box after successful send
-- Handle send failures (rate limit, permission denied) with status bar error
-- Store sent message in SQLite on gateway confirmation (MESSAGE_CREATE)
-- Test: send message via mock HTTP, verify gateway echo
-- Files: `src/app.rs`, `src/discord/http_client.rs`
+**Task 22: Message sending**
+- In Insert mode, Enter produces `Action::SendMessage`
+- Action handler sends `HttpRequest::SendMessage` to http_tx channel
+- Clear input box immediately (optimistic)
+- Gateway will echo back MESSAGE_CREATE → message appears in view
+- Handle BackgroundResult::HttpError with status bar error display
+- Test: send message via mock HTTP, verify gateway echo inserts into cache
+- Files: `src/action.rs`, `src/app.rs`
 
-**Task 21: Message editing**
-- In Normal mode, press `e` on own message -> populate input box with message content
+**Task 23: Message editing**
+- In Normal mode, press `e` on own message → populate InputState with message content + editing ID
 - Input box shows "Editing message" header
-- Enter sends PATCH request to update message
-- Handle edit failure gracefully
+- Enter produces `Action::EditMessage`
+- Action handler sends `HttpRequest::EditMessage` to http_tx
+- Gateway echoes MESSAGE_UPDATE → cache + rendered cache invalidated
 - Test: edit flow via mock server
-- Files: `src/app.rs`
+- Files: `src/action.rs`
 
-**Task 22: Message deletion**
-- In Normal mode, press `d` on own message -> show confirmation prompt
-- `y` confirms deletion via DELETE request
-- Remove message from view and SQLite
+**Task 24: Message deletion**
+- In Normal mode, press `d` on own message → show confirmation prompt
+- `y` confirms → produces `Action::DeleteMessage`
+- Action handler sends `HttpRequest::DeleteMessage`
+- Gateway echoes MESSAGE_DELETE → remove from cache VecDeque + SQLite
 - Test: delete flow with confirmation via mock server
-- Files: `src/app.rs`
+- Files: `src/action.rs`
 
-**Task 23: Reply to message**
-- In Normal mode, press `r` on any message -> enter Insert mode with reply context
+**Task 25: Reply to message**
+- In Normal mode, press `r` on any message → set InputState.reply_to, enter Insert mode
 - Input box shows "Replying to @author: message preview..." header
-- Send message with `message_reference` field
+- Enter produces `Action::SendMessage` with `reply_to` set
+- HttpRequest::SendMessage includes `message_reference` field
 - Test: reply flow, message_reference is set correctly
-- Files: `src/app.rs`
+- Files: `src/action.rs`
 
-**Task 24: Message history scrolling**
-- Scroll up past cached messages -> fetch older messages from REST
-- Insert fetched messages into SQLite and prepend to view
+**Task 26: Message history scrolling**
+- Scroll up past cached messages → send DbRequest::FetchMessages (SQLite first)
+- If SQLite exhausted → send HttpRequest::FetchMessages (REST, `before` parameter)
+- BackgroundResult::MessagesFetched → VecDeque push_front (history backfill)
 - Loading indicator while fetching
 - Test: scroll triggers fetch, messages prepend correctly
-- Files: `src/ui/widgets/message_view.rs`, `src/app.rs`
+- Files: `src/ui/widgets/message_view.rs`, `src/action.rs`
 
-**Task 25: Gateway event handling**
-- Handle MESSAGE_CREATE -> insert into cache, SQLite, update relevant pane(s)
-- Handle MESSAGE_UPDATE -> update in cache, SQLite, re-render
-- Handle MESSAGE_DELETE -> remove from cache, SQLite, re-render
-- Handle TYPING_START -> show typing indicator
-- Handle GUILD_CREATE/UPDATE -> update cache
-- Handle CHANNEL_CREATE/UPDATE/DELETE -> update cache and sidebar
+**Task 27: Gateway event handling**
+- Handle MessageCreate → `cache.messages[channel_id].push_back()`, send DbRequest::InsertMessage, set dirty for all panes viewing that channel
+- Handle MessageUpdate → update in cache VecDeque (find by ID), invalidate rendered cache, send DbRequest::UpdateMessage
+- Handle MessageDelete → remove from cache VecDeque, send DbRequest::DeleteMessage
+- Handle TypingStart → update `cache.typing[channel_id]`, expire after 10s
+- Handle GuildCreate/Update → update `cache.guilds`, update `cache.guild_order`
+- Handle ChannelCreate/Update/Delete → update `cache.channels`, update guild's `channel_order`
 - Test: each event type via mock gateway
-- Files: `src/app.rs`, `src/discord/gateway.rs`
+- Files: `src/app.rs`
 
-### Discord Markdown (Tasks 26-28)
+### Discord Markdown (Tasks 28-30)
 
-**Task 26: Markdown parser (core)**
+**Task 28: Markdown parser (core)**
 - Create `src/markdown/parser.rs`
 - Parse: **bold**, *italic*, __underline__, ~~strikethrough~~, `inline code`, ```code blocks```
 - Parse: user mentions `<@id>`, channel mentions `<#id>`, role mentions `<@&id>`
 - Parse: custom emoji `<:name:id>` and `<a:name:id>` (animated)
-- Output: Vec of styled spans (text + style attributes)
+- Output: `MarkdownAst` — Vec of typed spans (text + style attributes + mention IDs)
+- Separate type from raw String prevents rendering unparsed content
 - Test: extensive parser tests for each markdown element, edge cases, nested formatting
-- Files: `src/markdown/parser.rs`, `src/markdown/mod.rs`, `tests/test_markdown.rs`
+- Files: `src/markdown/parser.rs`, `src/markdown/mod.rs`, `src/domain/markdown.rs`, `tests/test_markdown.rs`
 
-**Task 27: Markdown renderer**
+**Task 29: Markdown renderer**
 - Create `src/markdown/renderer.rs`
-- Convert parsed spans to ratatui `Spans`/`Line` with appropriate styles
-- Resolve mentions using cache (user ID -> display name, channel ID -> #channel-name)
-- Role mentions use role color from cache
-- Test: rendered output matches expected styled spans
+- Convert `MarkdownAst` spans to `Vec<ratatui::text::Line<'static>>` with appropriate styles
+- Resolve mentions using cache (user ID → display name, channel ID → #channel-name)
+- Role mentions use role color from `cache.guilds[guild_id].roles[role_id].color`
+- Cache rendered output in `CachedMessage.rendered` field (invalidate on MESSAGE_UPDATE)
+- Test: rendered output matches expected styled lines
 - Files: `src/markdown/renderer.rs`
 
-**Task 28: Markdown integration**
+**Task 30: Markdown integration**
 - Integrate markdown parser+renderer into message_view widget
-- Messages render with full formatting
-- Test: full message rendering pipeline
+- On first render of a message: parse → render → cache in `CachedMessage.rendered`
+- On subsequent renders: use cached `rendered` field directly
+- On MESSAGE_UPDATE: set `rendered = None` to force re-parse
+- Test: full message rendering pipeline, cache invalidation on edit
 - Files: `src/ui/widgets/message_view.rs`
 
-### Pane System (Tasks 29-35)
+### Pane System (Tasks 31-37)
 
-**Task 29: Pane tree data structure**
-- Create `src/ui/pane.rs` with `PaneNode` enum (Leaf/Split)
-- Binary tree operations: insert (split), remove (close), find by ID
-- Tree traversal: in-order for pane numbering, find by direction for focus movement
-- Test: extensive tree manipulation tests
-- Files: `src/ui/pane.rs`, `tests/test_pane_tree.rs`
+**Task 31: Pane tree data structure**
+- Create `src/domain/pane.rs` with `PaneNode` enum (Leaf/Split), `PaneId(u32)` newtype
+- Binary tree operations: insert (split at leaf), remove (close leaf, collapse parent), find by ID
+- Tree traversal: in-order for pane numbering, find leaf by direction for focus movement
+- All operations O(log n) where n = pane count (typically 2-8)
+- Test: extensive tree manipulation tests (split, close, find, traversal, edge cases)
+- Files: `src/domain/pane.rs`, `tests/test_pane_tree.rs`
 
-**Task 30: Pane manager**
-- Create `src/ui/pane_manager.rs` with `PaneManager`
-- Split pane (horizontal/vertical) at current focus
-- Close pane (collapse parent split node)
+**Task 32: Pane manager**
+- Add `PaneManager` to `src/domain/pane.rs` (or `src/domain/pane_manager.rs`)
+- Split pane (horizontal/vertical) at current focus → creates new leaf
+- Close pane (collapse parent split node, promote sibling)
 - Move focus directionally (up/down/left/right based on rendered positions)
 - Cycle focus (next pane in tree order)
+- Minimum pane size check: refuse split if resulting panes would be too small
 - Test: all pane operations
-- Files: `src/ui/pane_manager.rs`
+- Files: `src/domain/pane.rs`
 
-**Task 31: Pane rendering**
-- Integrate pane tree into layout.rs
-- Recursively render pane tree as nested ratatui Layout splits
+**Task 33: Pane rendering**
+- Create `src/ui/pane_renderer.rs`
+- Recursively convert PaneNode tree → nested ratatui `Layout::split()` calls
 - Each leaf pane renders its own message_view + input_box
-- Active pane gets highlighted border, inactive panes get dim border
-- Pane title bar with `server > #channel`
+- Active pane gets highlighted border (config color), inactive panes get dim border
+- Pane title bar with `server > #channel` from cache lookup
 - Test: verify layout produces correct areas for various tree shapes
-- Files: `src/ui/layout.rs`
+- Files: `src/ui/pane_renderer.rs`, `src/ui/layout.rs`
 
-**Task 32: Pane prefix keybindings**
-- Implement PanePrefix input mode
-- After Ctrl+b, wait for next key to determine pane operation
-- " -> split horizontal, % -> split vertical, x -> close, o -> next, z -> zoom
-- Arrow keys -> directional focus, Ctrl+Arrow -> resize
-- Timeout or Esc cancels prefix mode
-- Test: each pane keybinding triggers correct operation
+**Task 34: Pane prefix keybindings**
+- Implement PanePrefix input mode in handler
+- After Ctrl+b, wait for next key → produce pane Action
+- " → `Action::SplitPane(Horizontal)`, % → `Action::SplitPane(Vertical)`, x → `Action::ClosePane`, o → `Action::FocusNextPane`, z → `Action::ToggleZoom`
+- Arrow keys → `Action::FocusPaneDirection(dir)`, Ctrl+Arrow → `Action::ResizePane(dir, delta)`
+- Timeout (1s) or Esc cancels prefix mode → back to Normal
+- Test: each pane keybinding triggers correct Action
 - Files: `src/input/handler.rs`
 
-**Task 33: Pane zoom**
-- Ctrl+b z toggles zoom on focused pane
-- Zoomed: render only the focused pane at full size (hide pane tree)
-- Unzoom: restore previous layout
+**Task 35: Pane zoom**
+- `Action::ToggleZoom` toggles zoom on focused pane
+- Zoomed: pane_renderer renders only the focused pane at full size
+- Unzoom: restore previous layout (PaneManager.zoom_state tracks zoomed pane)
 - Status bar shows zoom indicator
 - Test: zoom/unzoom preserves pane state
-- Files: `src/ui/pane_manager.rs`, `src/ui/layout.rs`
+- Files: `src/domain/pane.rs`, `src/ui/pane_renderer.rs`
 
-**Task 34: Pane channel assignment**
-- When in a pane, channel selection from sidebar assigns channel to that pane
-- Each pane subscribes to gateway events for its channel
+**Task 36: Pane channel assignment**
+- When sidebar selection fires `Action::SwitchChannel(id)`, it assigns to the focused pane
+- Gateway events route to all panes viewing the affected channel (iterate leaves, check channel_id)
 - New messages appear in all panes viewing that channel
 - Test: multi-pane with different channels, events route correctly
-- Files: `src/app.rs`
+- Files: `src/action.rs`, `src/app.rs`
 
-**Task 35: Pane session persistence**
-- Save pane tree layout to SQLite on exit (tree structure + channel IDs per pane)
+**Task 37: Pane session persistence**
+- Save pane tree layout to SQLite on exit (serialize PaneNode tree + channel IDs as JSON)
+- `DbRequest::SaveSession` / `DbRequest::LoadSession`
 - Restore pane layout from SQLite on startup
-- Auto-save session periodically
+- Auto-save session periodically (every 60s if dirty)
 - Test: save and restore produces identical layout
-- Files: `src/db.rs`, `src/ui/pane_manager.rs`
+- Files: `src/infrastructure/db.rs`, `src/domain/pane.rs`
 
-### Login UI (Tasks 36-38)
+### Login UI (Tasks 38-40)
 
-**Task 36: Token paste login**
+**Task 38: Token paste login**
 - Create `src/ui/login.rs` with login screen
 - Option 1: Paste token directly
 - Validate token by attempting gateway connection
@@ -767,34 +925,101 @@ These are the concrete tasks for the Ralph loop. Each task should be completable
 - Test: login flow with valid/invalid mock tokens
 - Files: `src/ui/login.rs`
 
-**Task 37: Email + password login**
+**Task 39: Email + password login**
 - Login screen option 2: email + password form
-- POST to Discord's login endpoint
+- POST to Discord's login endpoint via reqwest (with anti-detection headers)
 - Handle 2FA challenge (prompt for TOTP code)
 - Extract token from response
 - Test: login flow via mock HTTP endpoints
 - Files: `src/ui/login.rs`, `src/auth.rs`
 
-**Task 38: QR code login**
+**Task 40: QR code login**
 - Login screen option 3: QR code
-- Generate QR code for Discord mobile app scan
-- Poll for scan completion
-- Extract token from response
-- Test: QR generation, poll cycle
+- Connect to Discord Remote Auth WebSocket (wss://remote-auth-gateway.discord.gg)
+- Generate QR code using `qrcode` crate, render in terminal
+- Poll for scan completion, extract encrypted token
+- Test: QR generation, WebSocket handshake, poll cycle
 - Files: `src/ui/login.rs`, `src/auth.rs`
+
+---
+
+## Core Operations Analysis
+
+Understanding what operations the application performs drives the choice of data types and data structures.
+
+### Operation Frequency Table
+
+| Operation | Frequency | Latency Budget | Data Access Pattern |
+|-----------|-----------|----------------|---------------------|
+| Render frame | 60/s (when dirty) | <16ms | Read all visible state |
+| Gateway event receive | ~1-50/s | <1ms processing | Write to cache, read channel lookup |
+| Key input handling | ~1-10/s | <1ms | Read mode, write state |
+| Message display (per visible msg) | 60/s | <0.1ms each | Read message + author + cached markdown |
+| Channel switch | ~0.1/s | <100ms perceived | Read SQLite, maybe REST fetch, write pane state |
+| Message send | ~0.01/s | <500ms perceived | Write to HTTP actor channel |
+| Pane split/close | ~0.01/s | <16ms | Tree insert/remove |
+| Sidebar render | 60/s (when dirty) | <2ms | Iterate guilds, iterate channels per guild |
+| Mention resolution | Per message render | <0.01ms | HashMap lookup by ID |
+| Scroll | ~5/s | <16ms | Offset change, possible lazy load trigger |
+
+### Critical Path: Message Receive → Display
+
+```
+Gateway WS frame
+  → zlib decompress (infra)
+  → JSON deserialize (infra)
+  → gateway_tx.send(event) ──→ main loop receives
+  → cache.insert_message(msg)     // O(1) HashMap + VecDeque push
+  → db_tx.send(InsertMessage(msg)) // async, fire-and-forget
+  → set dirty flag                 // O(1)
+  → next render tick: render visible messages
+    → for each visible msg:
+      → read cached rendered_lines (O(1) if cached)
+      → or parse markdown + cache result
+```
+
+### Critical Path: Sidebar Render
+
+```
+for guild_id in guild_order:           // Vec<Id<GuildMarker>> sorted by position
+    guild = guilds.get(guild_id)       // O(1) HashMap
+    for channel in guild_channels[guild_id]:  // Vec sorted by (category_pos, pos)
+        render channel name + unread indicator
+```
 
 ---
 
 ## Data Models
 
-### AppState
+### Design Principles
+
+1. **Type-safe IDs**: Use `twilight_model::id::Id<T>` with marker types. `Id<UserMarker>` and `Id<ChannelMarker>` are different types — the compiler prevents mixing them. These are `Copy`, `Hash`, `Eq`, backed by `NonZeroU64` — perfect as `HashMap` keys.
+2. **Separate content representations**: Raw string → Parsed AST → Rendered Lines. Each stage has its own type to prevent accidentally rendering unparsed content.
+3. **State machines as enums**: Connection state, input mode, scroll state — all use enums with data-carrying variants to make impossible states unrepresentable.
+4. **Owned data in cache, borrowed for render**: Cache owns all data. Render borrows via `&`. No `Arc` or `Rc` needed since the main loop owns everything.
+
+### Application State
+
 ```rust
+/// Top-level application state. Owned exclusively by the main loop.
+/// No Arc<Mutex<_>> — the tokio::select! hub is the single owner.
 struct App {
-    // Discord connection
-    gateway: GatewayConnection,
-    http: HttpClient,
+    // State
+    state: AppState,
+    dirty: bool,  // Set true on any state change, cleared after render
+
+    // Channels for background communication
+    gateway_rx: mpsc::UnboundedReceiver<GatewayEvent>,
+    background_rx: mpsc::Receiver<BackgroundResult>,
+    http_tx: mpsc::Sender<HttpRequest>,
+    db_tx: mpsc::Sender<DbRequest>,
+}
+
+struct AppState {
+    // Discord state
     cache: DiscordCache,
-    db: Database,
+    connection: ConnectionState,
+    current_user: CurrentUser,
 
     // UI state
     pane_manager: PaneManager,
@@ -802,31 +1027,248 @@ struct App {
     sidebar_visible: bool,
     command_palette: Option<CommandPaletteState>,
 
-    // User
-    current_user: CurrentUser,
+    // Input
+    input_mode: InputMode,
 
     // Settings
     config: AppConfig,
+}
 
-    // Input
-    input_mode: InputMode,
+/// Connection state machine — makes impossible states unrepresentable
+enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected {
+        session_id: String,
+        resume_url: String,
+        sequence: u64,
+    },
+    Resuming {
+        session_id: String,
+        resume_url: String,
+        sequence: u64,
+    },
 }
 ```
 
-### PaneManager (Binary Tree)
+### Discord Cache (In-Memory)
+
+Data structure choices driven by operation patterns:
+
 ```rust
+/// In-memory cache of Discord state. All lookups are O(1) by ID.
+/// Optimized for the two hot paths: message receive and render.
+struct DiscordCache {
+    // O(1) lookup by ID — the primary access pattern for all Discord entities
+    guilds: HashMap<Id<GuildMarker>, CachedGuild>,
+    channels: HashMap<Id<ChannelMarker>, CachedChannel>,
+    users: HashMap<Id<UserMarker>, CachedUser>,
+
+    // Ordered guild list for sidebar rendering (maintained on READY + GUILD_* events)
+    // Vec because guild order rarely changes and sequential iteration is the hot path
+    guild_order: Vec<Id<GuildMarker>>,
+
+    // Per-channel message windows — the core data structure for chat display
+    // VecDeque: O(1) push_back (new messages), O(1) push_front (history backfill),
+    // efficient sequential iteration for rendering visible slice
+    messages: HashMap<Id<ChannelMarker>, VecDeque<CachedMessage>>,
+
+    // Per-channel typing indicators: (user_id, started_at)
+    // Small Vec per channel — typically 0-3 people typing at once
+    typing: HashMap<Id<ChannelMarker>, Vec<(Id<UserMarker>, Instant)>>,
+
+    // Channel → Guild reverse lookup (needed for "which guild is this channel in?")
+    channel_guild: HashMap<Id<ChannelMarker>, Id<GuildMarker>>,
+
+    // Unread state per channel
+    read_states: HashMap<Id<ChannelMarker>, ReadState>,
+
+    // DM channels from READY event (never mutated via API)
+    dm_channels: Vec<Id<ChannelMarker>>,
+}
+
+struct CachedGuild {
+    id: Id<GuildMarker>,
+    name: String,
+    icon: Option<String>,
+    // Channels sorted by (category_position, position) for sidebar render.
+    // Vec<Id> because the order only changes on CHANNEL_UPDATE which is rare.
+    channel_order: Vec<Id<ChannelMarker>>,
+    roles: HashMap<Id<RoleMarker>, CachedRole>,
+}
+
+struct CachedChannel {
+    id: Id<ChannelMarker>,
+    guild_id: Option<Id<GuildMarker>>,  // None for DMs
+    name: String,
+    kind: ChannelType,                   // twilight_model::channel::ChannelType
+    position: i32,
+    parent_id: Option<Id<ChannelMarker>>,  // category
+    topic: Option<String>,
+}
+
+struct CachedUser {
+    id: Id<UserMarker>,
+    name: String,
+    discriminator: Option<u16>,  // None for new username system
+    display_name: Option<String>,
+    avatar: Option<String>,
+}
+
+struct CachedRole {
+    id: Id<RoleMarker>,
+    name: String,
+    color: u32,     // RGB color for rendering
+    position: i32,
+}
+
+/// Message with pre-parsed/cached rendered output.
+/// Separate types for raw content vs rendered prevent mixing.
+struct CachedMessage {
+    id: Id<MessageMarker>,
+    channel_id: Id<ChannelMarker>,
+    author_id: Id<UserMarker>,
+    content: String,                        // Raw Discord markdown
+    timestamp: String,                      // ISO 8601
+    edited_timestamp: Option<String>,
+    attachments: Vec<MessageAttachment>,
+    embeds: Vec<MessageEmbed>,              // Simplified embed struct
+    message_reference: Option<MessageReference>,
+    mention_everyone: bool,
+    mentions: Vec<Id<UserMarker>>,
+
+    // Cached render output — invalidated on edit, lazily computed
+    rendered: Option<Vec<ratatui::text::Line<'static>>>,
+}
+
+struct MessageAttachment {
+    filename: String,
+    size: u64,
+    url: String,
+    content_type: Option<String>,
+}
+
+struct MessageEmbed {
+    title: Option<String>,
+    description: Option<String>,
+    color: Option<u32>,
+    url: Option<String>,
+}
+
+struct MessageReference {
+    message_id: Option<Id<MessageMarker>>,
+    channel_id: Option<Id<ChannelMarker>>,
+    guild_id: Option<Id<GuildMarker>>,
+}
+
+struct ReadState {
+    last_message_id: Id<MessageMarker>,
+    mention_count: u32,
+}
+
+/// Maximum messages kept in memory per channel.
+/// Older messages are evicted from VecDeque front, available via SQLite.
+const MAX_CACHED_MESSAGES_PER_CHANNEL: usize = 200;
+```
+
+### Gateway Events (User Account Format)
+
+Custom event enum because twilight-model's `Event` is bot-format and misses user-specific fields:
+
+```rust
+/// Gateway events in user-account format.
+/// Deserialized from raw JSON using serde, not twilight's built-in parser.
+enum GatewayEvent {
+    // Connection lifecycle
+    Hello { heartbeat_interval: u64 },
+    Ready(Box<ReadyEvent>),         // Boxed — largest variant (~KBs of data)
+    Resumed,
+    InvalidSession { resumable: bool },
+    Reconnect,
+    HeartbeatAck,
+
+    // Messages
+    MessageCreate(Box<Message>),     // twilight_model::channel::Message
+    MessageUpdate(Box<MessageUpdate>),
+    MessageDelete { id: Id<MessageMarker>, channel_id: Id<ChannelMarker> },
+
+    // Guilds
+    GuildCreate(Box<Guild>),         // twilight_model::guild::Guild
+    GuildUpdate(Box<PartialGuild>),
+    GuildDelete { id: Id<GuildMarker> },
+
+    // Channels
+    ChannelCreate(Box<Channel>),
+    ChannelUpdate(Box<Channel>),
+    ChannelDelete(Box<Channel>),
+
+    // Typing
+    TypingStart {
+        channel_id: Id<ChannelMarker>,
+        user_id: Id<UserMarker>,
+        timestamp: u64,
+    },
+
+    // Presence (Phase 3)
+    PresenceUpdate(Box<PresenceUpdate>),
+
+    // Reactions (Phase 3)
+    ReactionAdd(Box<ReactionAdd>),
+    ReactionRemove(Box<ReactionRemove>),
+
+    // Catch-all for events we don't handle yet
+    Unknown { op: u8, event_name: Option<String> },
+}
+
+/// User-account READY event. Contains fields that twilight ignores.
+struct ReadyEvent {
+    user: CurrentUser,
+    guilds: Vec<Guild>,
+    private_channels: Vec<Channel>,    // DM channels — bot READY doesn't have this
+    session_id: String,
+    resume_gateway_url: String,
+    // User-specific fields (not in bot READY):
+    read_states: Vec<ReadState>,        // Per-channel read position
+    relationships: Vec<Relationship>,   // Friends list
+    user_settings: Option<serde_json::Value>,  // Opaque — we only need a few fields
+    guild_folders: Vec<GuildFolder>,    // Folder ordering for sidebar
+}
+
+struct GuildFolder {
+    guild_ids: Vec<Id<GuildMarker>>,
+    name: Option<String>,
+    color: Option<u32>,
+}
+
+struct Relationship {
+    id: Id<UserMarker>,
+    kind: RelationshipType,  // Friend, Blocked, PendingIncoming, PendingOutgoing
+    user: User,
+}
+```
+
+### Pane System (Binary Tree)
+
+```rust
+/// Newtype for pane IDs — prevents mixing with Discord IDs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PaneId(u32);
+
 struct PaneManager {
     root: PaneNode,
     focused_pane_id: PaneId,
-    zoom_state: Option<PaneId>,  // If a pane is zoomed
-    next_id: u32,                // ID counter
+    zoom_state: Option<PaneId>,   // If a pane is zoomed to fullscreen
+    next_id: u32,                 // Monotonic ID counter
 }
 
+/// Binary tree for pane layout. Recursive structure.
+/// Tree operations (split, close, find) are O(log n) where n = pane count.
+/// For typical usage (2-8 panes), this is effectively O(1).
 enum PaneNode {
     Leaf(Pane),
     Split {
         direction: SplitDirection,
-        ratio: f32,           // 0.0-1.0, position of divider
+        ratio: f32,              // 0.0-1.0, position of divider
         first: Box<PaneNode>,
         second: Box<PaneNode>,
     },
@@ -839,23 +1281,114 @@ enum SplitDirection {
 
 struct Pane {
     id: PaneId,
-    channel_id: Option<ChannelId>,
-    guild_id: Option<GuildId>,
-    scroll_state: ScrollState,
+    channel_id: Option<Id<ChannelMarker>>,
+    guild_id: Option<Id<GuildMarker>>,
+    scroll: ScrollState,
     input: InputState,
-    follow_mode: bool,  // auto-scroll to new messages
 }
 
+/// Scroll state machine: Following (auto-scroll) vs Manual (user scrolled up)
 enum ScrollState {
-    Following,                    // At bottom, auto-scroll
-    Manual { offset: usize },     // User scrolled up
+    Following,                    // At bottom, auto-scroll on new messages
+    Manual { offset: usize },     // User scrolled up by N messages from bottom
+}
+
+struct InputState {
+    content: String,       // Current input text
+    cursor_pos: usize,     // Byte offset cursor position
+    cursor_col: usize,     // Display column (may differ from byte offset for unicode)
+    mode: InputMode,       // What we're doing: composing, editing, replying
+    reply_to: Option<Id<MessageMarker>>,  // If replying to a message
+    editing: Option<Id<MessageMarker>>,   // If editing a message
+}
+```
+
+### Action Enum (Command Pattern)
+
+All state mutations flow through a single `Action` enum. This makes the app testable (fire actions, assert state) and debuggable (log all actions).
+
+```rust
+/// Every state mutation is an Action. Input handlers produce Actions,
+/// the main loop applies them. This decouples input from state mutation.
+enum Action {
+    // Navigation
+    SwitchChannel(Id<ChannelMarker>),
+    ScrollUp(usize),
+    ScrollDown(usize),
+    ScrollToTop,
+    ScrollToBottom,  // re-enters Following mode
+
+    // Messages
+    SendMessage { channel_id: Id<ChannelMarker>, content: String, reply_to: Option<Id<MessageMarker>> },
+    EditMessage { message_id: Id<MessageMarker>, content: String },
+    DeleteMessage { message_id: Id<MessageMarker>, channel_id: Id<ChannelMarker> },
+
+    // Input mode
+    EnterInsertMode,
+    EnterNormalMode,
+    EnterCommandMode,
+    EnterPanePrefix,
+
+    // Pane operations
+    SplitPane(SplitDirection),
+    ClosePane,
+    FocusNextPane,
+    FocusPaneDirection(Direction),
+    ResizePane(Direction, i16),  // +/- delta
+    ToggleZoom,
+    SwapPane(Direction),
+
+    // UI toggles
+    ToggleSidebar,
+    ToggleCommandPalette,
+
+    // System
+    Quit,
+    ForceQuit,
+}
+```
+
+### Background Communication Types
+
+```rust
+/// Requests sent to the HTTP actor task
+enum HttpRequest {
+    SendMessage { channel_id: Id<ChannelMarker>, content: String, nonce: String, reply_to: Option<Id<MessageMarker>> },
+    EditMessage { channel_id: Id<ChannelMarker>, message_id: Id<MessageMarker>, content: String },
+    DeleteMessage { channel_id: Id<ChannelMarker>, message_id: Id<MessageMarker> },
+    FetchMessages { channel_id: Id<ChannelMarker>, before: Option<Id<MessageMarker>>, limit: u8 },
+    SendTyping { channel_id: Id<ChannelMarker> },
+}
+
+/// Requests sent to the SQLite worker task
+enum DbRequest {
+    InsertMessage(CachedMessage),
+    InsertMessages(Vec<CachedMessage>),
+    UpdateMessage { id: Id<MessageMarker>, content: String, edited_timestamp: String },
+    DeleteMessage(Id<MessageMarker>),
+    FetchMessages { channel_id: Id<ChannelMarker>, before_timestamp: Option<String>, limit: u32 },
+    SaveSession { name: String, layout_json: String },
+    LoadSession { name: String },
+}
+
+/// Results from background tasks back to main loop
+enum BackgroundResult {
+    // HTTP responses
+    MessagesFetched { channel_id: Id<ChannelMarker>, messages: Vec<CachedMessage> },
+    HttpError { request: String, error: String },
+
+    // SQLite results
+    CachedMessages { channel_id: Id<ChannelMarker>, messages: Vec<CachedMessage> },
+    SessionLoaded { name: String, layout_json: Option<String> },
+    DbError { operation: String, error: String },
 }
 ```
 
 ### Database Schema
+
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY,       -- Discord snowflake
+    id INTEGER PRIMARY KEY,       -- Discord snowflake (u64 fits in i64)
     channel_id INTEGER NOT NULL,
     author_id INTEGER NOT NULL,
     content TEXT NOT NULL,
@@ -864,17 +1397,19 @@ CREATE TABLE IF NOT EXISTS messages (
     attachments TEXT,              -- JSON array
     embeds TEXT,                   -- JSON array
     message_reference TEXT,        -- JSON (for replies)
+    mentions TEXT,                 -- JSON array of user IDs
     UNIQUE(id)
 );
-CREATE INDEX idx_messages_channel ON messages(channel_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_channel_id ON messages(channel_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS channels (
     id INTEGER PRIMARY KEY,
     guild_id INTEGER,
     name TEXT NOT NULL,
-    type INTEGER NOT NULL,
+    kind INTEGER NOT NULL,         -- ChannelType as integer
     position INTEGER DEFAULT 0,
-    parent_id INTEGER,            -- category
+    parent_id INTEGER,             -- category
     last_read_message_id INTEGER
 );
 
@@ -886,10 +1421,50 @@ CREATE TABLE IF NOT EXISTS guilds (
 
 CREATE TABLE IF NOT EXISTS sessions (
     name TEXT PRIMARY KEY,
-    pane_layout TEXT NOT NULL,    -- JSON serialized pane tree
-    last_used TEXT NOT NULL       -- ISO 8601
+    pane_layout TEXT NOT NULL,     -- JSON serialized pane tree
+    last_used TEXT NOT NULL        -- ISO 8601
 );
 ```
+
+---
+
+## Type Safety & Performance Review
+
+### Type Safety Guarantees
+
+| Concern | Solution | Enforcement |
+|---------|----------|-------------|
+| ID mixup (user ID used as channel ID) | `Id<T>` marker types from twilight-model | Compile-time error |
+| Pane ID vs Discord ID | `PaneId(u32)` newtype, completely disjoint from `Id<T>` | Compile-time error |
+| Rendering unparsed markdown | Separate types: `String` (raw) → `MarkdownAst` (parsed) → `Vec<Line>` (rendered) | Type system |
+| Invalid state transitions | `ConnectionState`, `InputMode`, `ScrollState` as enums with data | Pattern exhaustiveness |
+| Missing anti-detection headers | All HTTP goes through single `HttpClient` actor that always adds headers | Architecture |
+| Accidental DM channel creation | No `create_dm_channel()` method exists on `HttpClient` | API surface |
+| Concurrent mutable state | Main loop exclusively owns `AppState`, no `Arc<Mutex>` | Ownership system |
+
+### Performance Characteristics
+
+| Operation | Time Complexity | Space | Notes |
+|-----------|----------------|-------|-------|
+| Message insert (cache) | O(1) amortized | VecDeque push_back | Evicts from front at MAX_CACHED_MESSAGES_PER_CHANNEL |
+| Message history backfill | O(1) amortized | VecDeque push_front | Triggered by scroll-up past cached range |
+| Guild/channel/user lookup | O(1) average | HashMap | Hot path in mention resolution and render |
+| Pane tree traversal | O(log n) | Recursive | n = pane count, typically 2-8 |
+| Sidebar render | O(g * c) | Sequential | g = guilds, c = avg channels per guild |
+| Markdown parse | O(n) | Per-character scan | n = message length, cached after first parse |
+| Render frame | O(v) | Read-only borrow | v = visible messages, dirty flag skips unchanged frames |
+| SQLite insert | O(log n) B-tree | spawn_blocking | Never blocks the event loop |
+| Channel switch | O(1) + SQLite | Async pipeline | Cache lookup O(1), SQLite fetch async, REST fetch async |
+
+### Potential Bottlenecks & Mitigations
+
+| Bottleneck | When | Mitigation |
+|------------|------|------------|
+| Markdown parsing on large messages | Messages with heavy formatting | Cache parsed output in `CachedMessage.rendered`, invalidate only on MESSAGE_UPDATE |
+| SQLite write contention | High-volume channels (>10 msg/s) | Batch inserts via `InsertMessages` variant, WAL mode for concurrent read/write |
+| READY event processing | Initial connection (many guilds) | Process READY on background task, stream results to main loop |
+| Terminal rendering large pane trees | >8 panes on small terminal | Minimum pane size check, refuse split if too small |
+| Memory with many channels open | User opens 50+ channels | MAX_CACHED_MESSAGES_PER_CHANNEL (200) eviction, rest in SQLite |
 
 ---
 
@@ -1091,10 +1666,12 @@ cargo fmt --check
 |------|----------|------------|
 | Discord ToS violation (user client API) | High | Clear disclaimer on first launch, user assumes all risk |
 | Account detection/ban | Medium | Full anti-detection strategy: mimic web client IDENTIFY properties, respect rate limits, avoid suspicious endpoints (especially POST /users/@me/channels) |
-| API rate limiting | Medium | Built-in rate limiter via twilight-http, exponential backoff, request jitter |
+| API rate limiting | Medium | Custom per-route rate limiter in HTTP actor, exponential backoff, 50-150ms request jitter |
 | IDENTIFY properties becoming stale | Medium | Configurable `client_build_number` and browser version in config file, periodic update reminders |
-| Gateway zstd compression changes | Low | twilight-gateway handles this natively, keep dependencies updated |
+| Custom gateway bugs (vs battle-tested twilight) | Medium | Comprehensive mock gateway tests, heartbeat/RESUME edge case coverage, connection state machine prevents impossible states |
+| Gateway zlib-stream decompression edge cases | Low | Use flate2 with persistent decompressor state, test with real-world payloads from mock server |
 | Terminal compatibility (images, unicode) | Low | Graceful degradation, ratatui-image auto-detects protocol support |
+| SQLite blocking event loop | Low | All SQLite via `spawn_blocking`, never on main task |
 
 ---
 
@@ -1102,18 +1679,19 @@ cargo fmt --check
 
 - [Discord API Documentation (Unofficial)](https://discord.com/developers/docs)
 - [ratatui Documentation](https://ratatui.rs/)
-- [twilight Documentation](https://twilight.rs/)
-- [Discordo](https://github.com/ayn2op/discordo) - Go TUI client (user API, 5.1k stars)
-- [Oxicord](https://github.com/linuxmobile/oxicord) - Rust TUI client (user API, ratatui)
+- [twilight-model Documentation](https://docs.rs/twilight-model/) - Used for shared data types only
+- [Oxicord Source](https://github.com/linuxmobile/oxicord) - Rust TUI client, Clean Architecture reference, custom gateway/HTTP (not twilight-gateway)
+- [Discordo Source](https://github.com/ayn2op/discordo) - Go TUI client (user API, 5.1k stars), O(1) lookup patterns, virtual row building
 - [Endcord](https://github.com/sparklost/endcord) - Python TUI client (user API, most features)
 - [tmux Key Bindings Reference](https://tmuxcheatsheet.com/)
+- [Discord Gateway Reference](https://discord.com/developers/docs/events/gateway) - Opcodes, payloads, compression
 
 ---
 
 ## Notes for Claude (Ralph Loop)
 
 When working on tasks:
-1. **Work through Ralph Tasks sequentially** (Task 1, 2, 3...) - earlier tasks set up foundations for later ones
+1. **Work through Ralph Tasks sequentially** (Task 1, 2, 3... up to Task 40) - earlier tasks set up foundations for later ones
 2. **Always write tests first** before implementing a feature (TDD)
 3. **Run tests** after every change: `nix develop --command cargo test`
 4. **Run clippy** to catch issues: `nix develop --command cargo clippy -- -D warnings`
@@ -1123,3 +1701,8 @@ When working on tasks:
 8. **The pane system is the core differentiator** - ensure it works flawlessly before moving to Phase 3+
 9. **Never call POST /users/@me/channels** - use DM channels from READY event only
 10. **All commands run in `nix develop`** - do not install anything globally
+11. **Custom gateway, not twilight-gateway** - twilight-gateway is bot-only. Use tokio-tungstenite with custom IDENTIFY
+12. **Custom HTTP, not twilight-http** - twilight-http adds `Bot ` prefix. Use reqwest with anti-detection headers
+13. **twilight-model is OK** - use it for shared types (`Id<T>`, `Message`, `Channel`, `Guild`, etc.)
+14. **No Arc<Mutex<_>>** - main loop owns all state, background tasks communicate via mpsc channels
+15. **Dirty flag rendering** - set `dirty = true` on state change, only render when dirty
