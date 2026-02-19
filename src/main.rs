@@ -3,6 +3,8 @@ use color_eyre::eyre::Result;
 #[allow(dead_code)]
 mod app;
 #[allow(dead_code)]
+mod auth;
+#[allow(dead_code)]
 mod config;
 #[allow(dead_code)]
 mod domain;
