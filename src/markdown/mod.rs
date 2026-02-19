@@ -1,1 +1,3 @@
-// Markdown module - will be populated in later tasks
+pub mod integration;
+pub mod parser;
+pub mod renderer;

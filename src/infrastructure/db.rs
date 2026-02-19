@@ -217,6 +217,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedMessage> {
         message_reference,
         mention_everyone: mention_everyone != 0,
         mentions,
+        rendered: None,
     })
 }
 
@@ -237,6 +238,7 @@ mod tests {
             message_reference: None,
             mention_everyone: false,
             mentions: vec![],
+            rendered: None,
         }
     }
 
@@ -307,6 +309,7 @@ mod tests {
             }),
             mention_everyone: true,
             mentions: vec![Id::new(200), Id::new(300)],
+            rendered: None,
         };
         insert_message(&conn, &msg).unwrap();
 

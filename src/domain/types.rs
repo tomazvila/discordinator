@@ -86,6 +86,8 @@ pub struct CachedMessage {
     pub message_reference: Option<MessageReference>,
     pub mention_everyone: bool,
     pub mentions: Vec<Id<UserMarker>>,
+    /// Cached rendered output - lazily computed, invalidated on edit.
+    pub rendered: Option<Vec<ratatui::text::Line<'static>>>,
 }
 
 /// Message attachment metadata.
@@ -384,6 +386,7 @@ mod tests {
             message_reference: None,
             mention_everyone: false,
             mentions: vec![],
+            rendered: None,
         };
 
         assert_eq!(msg.content, "Hello world");
@@ -419,6 +422,7 @@ mod tests {
             }),
             mention_everyone: false,
             mentions: vec![Id::new(10), Id::new(20)],
+            rendered: None,
         };
 
         assert_eq!(msg.attachments.len(), 1);
