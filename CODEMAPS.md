@@ -1,43 +1,43 @@
 # CODEMAPS.md — Discordinator Codebase Map
 
-**34 source files, ~11,200 lines of Rust**
+**34 source files, ~15,922 lines of Rust**
 
 ## File Index
 
 | File | Lines | Layer | Purpose |
 |------|-------|-------|---------|
 | `src/main.rs` | 38 | App | Entry point, panic handler, tracing init |
-| `src/app.rs` | 921 | App | `AppState`, `apply_action()` central state mutation |
-| `src/auth.rs` | ~1060 | App | Token retrieval, email/password login, QR auth, token validation |
-| `src/config.rs` | 468 | App | TOML config with `AppConfig`, `DiscordConfig`, `AppDirs` |
+| `src/app.rs` | 869 | App | `AppState`, `apply_action()` central state mutation |
+| `src/auth.rs` | 1072 | App | Token retrieval, email/password login, QR auth, `validate_token_via_gateway` |
+| `src/config.rs` | 499 | App | TOML config with `AppConfig`, `DiscordConfig`, `AppDirs` |
 | `src/logging.rs` | 233 | App | File logging with rotation, panic handler |
 | `src/input/mod.rs` | 2 | App | Module declaration |
 | `src/input/mode.rs` | 67 | App | `InputMode` enum: Normal, Insert, Command, PanePrefix |
-| `src/input/handler.rs` | 305 | App | Key event → `Action` mapping per mode |
+| `src/input/handler.rs` | 352 | App | Key event → `Action` mapping per mode |
 | `src/markdown/mod.rs` | 3 | App | Module declaration |
-| `src/markdown/parser.rs` | 770 | App | Discord markdown → `MarkdownAst` parser |
-| `src/markdown/renderer.rs` | 383 | App | `MarkdownAst` → ratatui `Line` renderer |
+| `src/markdown/parser.rs` | 944 | App | Discord markdown → `MarkdownAst` parser |
+| `src/markdown/renderer.rs` | 389 | App | `MarkdownAst` → ratatui `Line` renderer |
 | `src/markdown/integration.rs` | 212 | App | Lazy render cache, `DiscordCacheResolver` |
 | `src/domain/mod.rs` | 9 | Domain | Module declaration |
-| `src/domain/types.rs` | 670 | Domain | All core types: `Action` (31 variants), `CachedMessage`, `ConnectionState`, `PaneId`, `ScrollState`, `InputState`, `HttpRequest`, `DbRequest`, `BackgroundResult` |
-| `src/domain/cache.rs` | 671 | Domain | `DiscordCache` — in-memory guild/channel/user/message store |
-| `src/domain/event.rs` | 656 | Domain | `GatewayEvent` enum, `parse_gateway_payload()` JSON parser |
-| `src/domain/pane.rs` | 1434 | Domain | `PaneNode` binary tree, `PaneManager`, session serialization |
-| `src/domain/markdown.rs` | 65 | Domain | `MarkdownAst`, `MarkdownSpan`, `MarkdownStyle` data types |
+| `src/domain/types.rs` | 762 | Domain | All core types: `Action` (30 variants), `CachedMessage`, `ConnectionState`, `PaneId`, `ScrollState`, `InputState`, `HttpRequest`, `DbRequest`, `BackgroundResult` |
+| `src/domain/cache.rs` | 858 | Domain | `DiscordCache` — in-memory guild/channel/user/message store |
+| `src/domain/event.rs` | 729 | Domain | `GatewayEvent` enum, `parse_gateway_payload()` JSON parser |
+| `src/domain/pane.rs` | 1733 | Domain | `PaneNode` binary tree, `PaneManager`, session serialization |
+| `src/domain/markdown.rs` | 68 | Domain | `MarkdownAst`, `MarkdownSpan`, `MarkdownStyle` data types |
 | `src/infrastructure/mod.rs` | 5 | Infra | Module declaration |
-| `src/infrastructure/anti_detection.rs` | 250 | Infra | Chrome-mimicking headers, `X-Super-Properties`, `IdentifyProperties` |
+| `src/infrastructure/anti_detection.rs` | 255 | Infra | Chrome-mimicking headers, `X-Super-Properties`, `IdentifyProperties` |
 | `src/infrastructure/db.rs` | 525 | Infra | SQLite: messages, channels, guilds, sessions tables |
-| `src/infrastructure/gateway.rs` | 1323 | Infra | WebSocket gateway: `GatewayConnection`, `ZlibDecompressor`, `GatewayManager` with reconnect |
-| `src/infrastructure/http_client.rs` | 707 | Infra | `HttpActor` — REST API with per-route rate limiting |
+| `src/infrastructure/gateway.rs` | 1407 | Infra | WebSocket gateway: `GatewayConnection`, `ZlibDecompressor`, `GatewayManager` with reconnect |
+| `src/infrastructure/http_client.rs` | 718 | Infra | `HttpActor` — REST API with per-route rate limiting |
 | `src/infrastructure/keyring.rs` | 128 | Infra | `TokenStore` trait, `KeyringStore`, `MemoryTokenStore` |
 | `src/ui/mod.rs` | 5 | UI | Module declaration |
-| `src/ui/theme.rs` | 271 | UI | `Theme` with Discord dark mode colors, `parse_color()` |
-| `src/ui/layout.rs` | ~280 | UI | Top-level layout: sidebar + pane_renderer + status bar |
+| `src/ui/theme.rs` | 312 | UI | `Theme` with Discord dark mode colors, `parse_color()` |
+| `src/ui/layout.rs` | 336 | UI | Top-level layout: sidebar + pane_renderer + status bar |
 | `src/ui/pane_renderer.rs` | 320 | UI | Recursive pane tree renderer with zoom support |
-| `src/ui/login.rs` | ~1090 | UI | Login screen: 3 auth methods, form state |
+| `src/ui/login.rs` | 1084 | UI | Login screen: 3 auth methods, form state |
 | `src/ui/widgets/mod.rs` | 4 | UI | Module declaration |
-| `src/ui/widgets/input_box.rs` | 414 | UI | Message input widget, Unicode cursor management |
-| `src/ui/widgets/message_view.rs` | 455 | UI | Message list with scroll, date separators, attachments |
+| `src/ui/widgets/input_box.rs` | 569 | UI | Message input widget, Unicode cursor management |
+| `src/ui/widgets/message_view.rs` | 556 | UI | Message list with scroll, date separators, attachments |
 | `src/ui/widgets/server_tree.rs` | 514 | UI | Sidebar tree: guilds → channels → DMs |
 | `src/ui/widgets/status_bar.rs` | 345 | UI | Connection state, mode, pane count, zoom indicator |
 
@@ -68,14 +68,14 @@
 ## Key Types & Where They Live
 
 ### State & Actions (`domain/types.rs`)
-- `Action` — 31-variant enum, the command pattern for all state mutations
+- `Action` — 30-variant enum, the command pattern for all state mutations
 - `ConnectionState` — `Disconnected | Connecting | Connected { session_id, resume_url, sequence } | Resuming`
 - `CachedMessage` — message with lazy `rendered: Option<Vec<Line>>` for markdown cache
 - `HttpRequest` / `DbRequest` / `BackgroundResult` — channel message types for async actors
 - `PaneId(u32)`, `ScrollState`, `InputState`, `SplitDirection`, `Direction`
 
 ### Application State (`app.rs`)
-- `AppState` — owns: `DiscordCache`, `ConnectionState`, `PaneManager` (single source of truth for all pane state), `SidebarState`, `InputMode`, `AppConfig`, `Theme`
+- `AppState` — owns: `DiscordCache`, `ConnectionState`, `PaneManager` (single source of truth for all pane state — the flat `panes: Vec<PaneState>` and `focused_pane: usize` fields were removed), `SidebarState`, `InputMode`, `AppConfig`, `Theme`
 - `apply_action(Action, &mut AppState) -> bool` — **the only function that mutates AppState**
 - `App` — wraps `AppState` with `dirty` flag and terminal setup/teardown
 
@@ -116,10 +116,10 @@ Terminal Input → handle_key_event() → Action → apply_action() → AppState
 Gateway WS ──→ parse_gateway_payload() ──→ GatewayEvent ──→ Action ──→ apply_action()
                                                     ↓
 HTTP Actor ←── HttpRequest channel ←── apply_action() sends requests
-HTTP Actor ──→ BackgroundResult ──→ Action::HandleBackgroundResult
+HTTP Actor ──→ BackgroundResult ──→ main loop handles directly
                                                     ↓
 DB Actor ←── DbRequest channel ←── apply_action() sends requests
-DB Actor ──→ BackgroundResult ──→ Action::HandleBackgroundResult
+DB Actor ──→ BackgroundResult ──→ main loop handles directly
                                                     ↓
                                     AppState.dirty = true → render()
 ```
