@@ -426,6 +426,12 @@ pub struct ZlibDecompressor {
     decompress: Decompress,
 }
 
+impl Default for ZlibDecompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ZlibDecompressor {
     pub fn new() -> Self {
         Self {
@@ -853,9 +859,12 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), original);
 
-        // Also verify the old finish()-based data doesn't end with ZLIB_SUFFIX
+        // Verify finish()-based data does NOT end with ZLIB_SUFFIX
         // (it ends with a zlib checksum trailer instead)
-        let _ = compressed; // suppress unused warning
+        assert!(
+            !compressed.ends_with(&ZLIB_SUFFIX),
+            "finish()-based data should not end with ZLIB_SUFFIX"
+        );
     }
 
     #[test]

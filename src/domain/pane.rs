@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn panes_viewing_channel_single_match() {
         let mut pm = PaneManager::new();
-        let id1 = pm.split(SplitDirection::Vertical);
+        let _id1 = pm.split(SplitDirection::Vertical);
         let channel_id = Id::new(100);
         pm.root.find_mut(PaneId(0)).unwrap().channel_id = Some(channel_id);
 
@@ -1443,7 +1443,7 @@ mod tests {
         // Verify zoom is cleared using the *closing* pane's ID, not the new focused ID.
         let mut pm = PaneManager::new();
         let id1 = pm.split(SplitDirection::Horizontal);
-        let id2 = pm.split(SplitDirection::Horizontal);
+        let _id2 = pm.split(SplitDirection::Horizontal);
         // Zoom pane id1
         pm.focused_pane_id = id1;
         pm.toggle_zoom();

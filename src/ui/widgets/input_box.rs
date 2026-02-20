@@ -7,7 +7,6 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::domain::cache::DiscordCache;
 use crate::domain::types::InputState;
 use crate::input::mode::InputMode;
 use crate::ui::theme::Theme;
@@ -18,7 +17,6 @@ pub struct InputBox<'a> {
     input: &'a InputState,
     mode: InputMode,
     theme: &'a Theme,
-    cache: &'a DiscordCache,
 }
 
 impl<'a> InputBox<'a> {
@@ -28,7 +26,6 @@ impl<'a> InputBox<'a> {
             input: &pane.input,
             mode: state.input_mode,
             theme: &state.theme,
-            cache: &state.cache,
         }
     }
 
@@ -36,13 +33,11 @@ impl<'a> InputBox<'a> {
         input: &'a InputState,
         mode: InputMode,
         theme: &'a Theme,
-        cache: &'a DiscordCache,
     ) -> Self {
         Self {
             input,
             mode,
             theme,
-            cache,
         }
     }
 }
@@ -343,8 +338,7 @@ mod tests {
     fn render_empty_input_shows_placeholder() {
         let input = empty_input();
         let theme = Theme::default();
-        let cache = DiscordCache::default();
-        let widget = InputBox::from_parts(&input, InputMode::Normal, &theme, &cache);
+        let widget = InputBox::from_parts(&input, InputMode::Normal, &theme);
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
@@ -362,8 +356,7 @@ mod tests {
     fn render_insert_mode_placeholder() {
         let input = empty_input();
         let theme = Theme::default();
-        let cache = DiscordCache::default();
-        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme, &cache);
+        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme);
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
@@ -382,8 +375,7 @@ mod tests {
         let mut input = empty_input();
         input.content = "Hello world".to_string();
         let theme = Theme::default();
-        let cache = DiscordCache::default();
-        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme, &cache);
+        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme);
 
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
@@ -398,8 +390,7 @@ mod tests {
         let mut input = empty_input();
         input.reply_to = Some(Id::new(42));
         let theme = Theme::default();
-        let cache = DiscordCache::default();
-        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme, &cache);
+        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme);
 
         let area = Rect::new(0, 0, 50, 2);
         let mut buf = Buffer::empty(area);
@@ -415,8 +406,7 @@ mod tests {
         input.editing = Some(Id::new(99));
         input.content = "edited text".to_string();
         let theme = Theme::default();
-        let cache = DiscordCache::default();
-        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme, &cache);
+        let widget = InputBox::from_parts(&input, InputMode::Insert, &theme);
 
         let area = Rect::new(0, 0, 50, 2);
         let mut buf = Buffer::empty(area);

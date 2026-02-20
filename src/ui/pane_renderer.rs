@@ -119,7 +119,6 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
             &pane.input,
             state.input_mode,
             &state.theme,
-            &state.cache,
         );
         input.render(input_area, buf);
     }
