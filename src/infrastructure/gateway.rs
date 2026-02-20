@@ -459,9 +459,18 @@ impl ZlibDecompressor {
                 let before_in = self.decompress.total_in();
                 let before_out = self.decompress.total_out();
 
-                self.decompress
+                if let Err(e) = self
+                    .decompress
                     .decompress(&input[pos..], &mut chunk, FlushDecompress::Sync)
-                    .map_err(|e| color_eyre::eyre::eyre!("zlib-stream decompression failed: {}", e))?;
+                {
+                    // Reset the decompressor so subsequent messages can be
+                    // processed with a fresh context rather than a poisoned one.
+                    self.decompress = Decompress::new(true);
+                    return Err(color_eyre::eyre::eyre!(
+                        "zlib-stream decompression failed: {}",
+                        e
+                    ));
+                }
 
                 let consumed = (self.decompress.total_in() - before_in) as usize;
                 let produced = (self.decompress.total_out() - before_out) as usize;
@@ -699,6 +708,55 @@ pub fn compute_backoff(current: u64) -> u64 {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn zlib_decompressor_resets_after_error_and_recovers() {
+        // This test verifies the fix for the "permanent poisoning" bug:
+        // If decompression fails (e.g. due to garbage input that triggers the
+        // zlib suffix check path), self.decompress must be reset so the next
+        // call with valid data can succeed.
+        //
+        // We simulate the failure by crafting a byte sequence that ends with
+        // ZLIB_SUFFIX but whose content is not valid zlib-compressed data.
+        // This causes the inner Decompress::decompress() to return an error,
+        // triggering the early exit.  After that, feeding valid compressed data
+        // must still work.
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        let mut decompressor = ZlibDecompressor::new();
+
+        // --- Phase 1: feed garbage that ends with ZLIB_SUFFIX → should error ---
+        let mut garbage = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        garbage.extend_from_slice(&ZLIB_SUFFIX);
+        let result = decompressor.decompress(&garbage);
+        assert!(
+            result.is_err(),
+            "Expected an error on garbage zlib data, got: {:?}",
+            result
+        );
+
+        // --- Phase 2: feed valid zlib data → should succeed after reset ---
+        let original = r#"{"op":10,"d":{"heartbeat_interval":41250}}"#;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(original.as_bytes()).unwrap();
+        encoder.flush().unwrap();
+        let valid = encoder.get_ref().clone();
+        assert!(valid.ends_with(&ZLIB_SUFFIX));
+
+        let result = decompressor.decompress(&valid);
+        assert!(
+            result.is_ok(),
+            "Decompressor should recover after reset, but got error: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            result.unwrap().as_deref(),
+            Some(original),
+            "Recovered decompressor should produce the correct plaintext"
+        );
+    }
 
     #[test]
     fn identify_payload_has_correct_structure() {
