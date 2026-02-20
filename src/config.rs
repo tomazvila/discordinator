@@ -466,3 +466,34 @@ client_build_number = 111111
         assert!(config.browser_user_agent.contains("Chrome"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- P7.1: config roundtrip serialization ---
+    proptest! {
+        #[test]
+        fn config_roundtrip(
+            render_fps in 1u32..240,
+            sidebar_width in 10u16..60,
+            message_cache_size in 100u32..50000,
+        ) {
+            let mut config = AppConfig::default();
+            config.general.render_fps = render_fps;
+            config.appearance.sidebar_width = sidebar_width;
+            config.general.message_cache_size = message_cache_size;
+
+            let toml_str = toml::to_string_pretty(&config).unwrap();
+            let restored: AppConfig = toml::from_str(&toml_str).unwrap();
+
+            prop_assert_eq!(restored.general.render_fps, render_fps);
+            prop_assert_eq!(restored.appearance.sidebar_width, sidebar_width);
+            prop_assert_eq!(restored.general.message_cache_size, message_cache_size);
+            // Other fields should remain at defaults
+            prop_assert_eq!(restored.general.timestamp_format, "%H:%M");
+            prop_assert_eq!(restored.pane.prefix_key, "Ctrl+b");
+        }
+    }
+}

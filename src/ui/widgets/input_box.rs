@@ -172,17 +172,34 @@ pub fn move_cursor_end(input: &mut InputState) {
 }
 
 /// Get the display width of a character.
-fn unicode_width(c: char) -> usize {
-    // Simple heuristic: CJK characters are 2 wide, everything else is 1
-    if ('\u{1100}'..='\u{115F}').contains(&c)
-        || ('\u{2E80}'..='\u{A4CF}').contains(&c)
-        || ('\u{AC00}'..='\u{D7A3}').contains(&c)
-        || ('\u{F900}'..='\u{FAFF}').contains(&c)
-        || ('\u{FE10}'..='\u{FE19}').contains(&c)
-        || ('\u{FE30}'..='\u{FE6F}').contains(&c)
-        || ('\u{FF00}'..='\u{FF60}').contains(&c)
-        || ('\u{FFE0}'..='\u{FFE6}').contains(&c)
-        || ('\u{20000}'..='\u{2FA1F}').contains(&c)
+/// Covers CJK, emoji, and other wide characters commonly seen in terminals.
+pub fn unicode_width(c: char) -> usize {
+    // Zero-width characters
+    if c == '\u{200B}' // zero-width space
+        || c == '\u{200C}' // zero-width non-joiner
+        || c == '\u{200D}' // zero-width joiner (ZWJ)
+        || c == '\u{FEFF}' // BOM / zero-width no-break space
+        || ('\u{FE00}'..='\u{FE0F}').contains(&c) // variation selectors
+    {
+        return 0;
+    }
+
+    // Double-width characters: CJK + emoji + fullwidth forms
+    if ('\u{1100}'..='\u{115F}').contains(&c)   // Hangul Jamo
+        || ('\u{2E80}'..='\u{A4CF}').contains(&c) // CJK Radicals..Yi Radicals
+        || ('\u{AC00}'..='\u{D7A3}').contains(&c) // Hangul Syllables
+        || ('\u{F900}'..='\u{FAFF}').contains(&c)  // CJK Compatibility Ideographs
+        || ('\u{FE10}'..='\u{FE19}').contains(&c)  // Vertical forms
+        || ('\u{FE30}'..='\u{FE6F}').contains(&c)  // CJK Compatibility Forms
+        || ('\u{FF00}'..='\u{FF60}').contains(&c)   // Fullwidth Forms
+        || ('\u{FFE0}'..='\u{FFE6}').contains(&c)   // Fullwidth Signs
+        || ('\u{20000}'..='\u{2FA1F}').contains(&c) // CJK Unified Ext B..Kangxi
+        // Emoji ranges (most render as 2 wide in terminals)
+        || ('\u{1F300}'..='\u{1F9FF}').contains(&c) // Misc Symbols, Emoticons, etc.
+        || ('\u{1FA00}'..='\u{1FA6F}').contains(&c) // Chess Symbols
+        || ('\u{1FA70}'..='\u{1FAFF}').contains(&c) // Symbols and Pictographs Ext-A
+        || ('\u{2600}'..='\u{27BF}').contains(&c)   // Misc Symbols, Dingbats
+        || ('\u{231A}'..='\u{23F3}').contains(&c)   // Misc Technical (clocks etc.)
     {
         2
     } else {
@@ -410,5 +427,143 @@ mod tests {
 
         let line1: String = (0..50).map(|x| buf[(x, 1u16)].symbol().to_string()).collect::<String>();
         assert!(line1.contains("edited text"), "line1 was: {}", line1);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Compute cursor_col from content and cursor_pos for verification.
+    fn expected_cursor_col(content: &str, cursor_pos: usize) -> usize {
+        content[..cursor_pos]
+            .chars()
+            .map(unicode_width)
+            .sum()
+    }
+
+    // --- P4.1 & P4.2: cursor_pos is valid UTF-8 boundary and in bounds ---
+    proptest! {
+        #[test]
+        fn cursor_pos_valid_after_inserts(chars in proptest::collection::vec(proptest::char::any(), 0..50)) {
+            let mut input = InputState::default();
+            for c in &chars {
+                insert_char(&mut input, *c);
+                prop_assert!(input.cursor_pos <= input.content.len(),
+                    "cursor_pos {} > len {}", input.cursor_pos, input.content.len());
+                prop_assert!(input.content.is_char_boundary(input.cursor_pos),
+                    "cursor_pos {} is not a char boundary", input.cursor_pos);
+            }
+        }
+    }
+
+    // --- P4.3: cursor_col consistency ---
+    proptest! {
+        #[test]
+        fn cursor_col_consistent_after_inserts(chars in proptest::collection::vec(proptest::char::any(), 0..50)) {
+            let mut input = InputState::default();
+            for c in &chars {
+                insert_char(&mut input, *c);
+                let expected = expected_cursor_col(&input.content, input.cursor_pos);
+                prop_assert_eq!(input.cursor_col, expected,
+                    "cursor_col {} != expected {} after inserting {:?}", input.cursor_col, expected, c);
+            }
+        }
+    }
+
+    // --- P4.4: insert then delete is identity ---
+    proptest! {
+        #[test]
+        fn insert_then_delete_is_identity(
+            initial in "[a-zA-Z0-9]{0,20}",
+            c in proptest::char::any()
+        ) {
+            let mut input = InputState::default();
+            // Set up initial content
+            for ch in initial.chars() {
+                insert_char(&mut input, ch);
+            }
+            let saved_content = input.content.clone();
+            let saved_pos = input.cursor_pos;
+            let saved_col = input.cursor_col;
+
+            insert_char(&mut input, c);
+            delete_char_before_cursor(&mut input);
+
+            prop_assert_eq!(&input.content, &saved_content,
+                "Content changed: {:?} -> {:?}", saved_content, input.content);
+            prop_assert_eq!(input.cursor_pos, saved_pos);
+            prop_assert_eq!(input.cursor_col, saved_col);
+        }
+    }
+
+    // --- P4.5: move_cursor_home sets pos=0, col=0 ---
+    proptest! {
+        #[test]
+        fn move_home_resets_cursor(chars in proptest::collection::vec(proptest::char::any(), 0..30)) {
+            let mut input = InputState::default();
+            for c in &chars {
+                insert_char(&mut input, *c);
+            }
+            move_cursor_home(&mut input);
+            prop_assert_eq!(input.cursor_pos, 0);
+            prop_assert_eq!(input.cursor_col, 0);
+        }
+    }
+
+    // --- P4.6: move_cursor_end sets pos = content.len() ---
+    proptest! {
+        #[test]
+        fn move_end_to_content_len(chars in proptest::collection::vec(proptest::char::any(), 0..30)) {
+            let mut input = InputState::default();
+            for c in &chars {
+                insert_char(&mut input, *c);
+            }
+            move_cursor_home(&mut input);
+            move_cursor_end(&mut input);
+            prop_assert_eq!(input.cursor_pos, input.content.len());
+            let expected = expected_cursor_col(&input.content, input.cursor_pos);
+            prop_assert_eq!(input.cursor_col, expected);
+        }
+    }
+
+    // --- P4.7: N right from home, N left returns to home ---
+    proptest! {
+        #[test]
+        fn right_then_left_returns_to_home(chars in proptest::collection::vec(proptest::char::any(), 1..20)) {
+            let mut input = InputState::default();
+            for c in &chars {
+                insert_char(&mut input, *c);
+            }
+            move_cursor_home(&mut input);
+            let n = input.content.chars().count();
+            for _ in 0..n {
+                move_cursor_right(&mut input);
+            }
+            for _ in 0..n {
+                move_cursor_left(&mut input);
+            }
+            prop_assert_eq!(input.cursor_pos, 0);
+            prop_assert_eq!(input.cursor_col, 0);
+        }
+    }
+
+    // --- P5.1: ASCII printable chars have width 1 ---
+    proptest! {
+        #[test]
+        fn ascii_printable_width_one(c in 0x20u8..0x7F) {
+            let ch = c as char;
+            prop_assert_eq!(unicode_width(ch), 1, "ASCII {:?} (0x{:02X}) has width != 1", ch, c);
+        }
+    }
+
+    // --- P5.4: width is always 0, 1, or 2 ---
+    proptest! {
+        #[test]
+        fn width_is_0_1_or_2(c in proptest::char::any()) {
+            let w = unicode_width(c);
+            prop_assert!(w <= 2, "unicode_width({:?}) = {} > 2", c, w);
+        }
     }
 }

@@ -668,3 +668,95 @@ mod tests {
         assert_eq!(deserialized.color, Some(0x00FF00));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- P10.1: MessageAttachment roundtrip ---
+    proptest! {
+        #[test]
+        fn attachment_roundtrip(
+            filename in "[a-zA-Z0-9._-]{1,30}",
+            size in 0u64..u64::MAX,
+            content_type in proptest::option::of("[a-z]+/[a-z]+"),
+        ) {
+            let attachment = MessageAttachment {
+                filename: filename.clone(),
+                size,
+                url: "https://example.com/file".to_string(),
+                content_type: content_type.clone(),
+            };
+            let json = serde_json::to_string(&attachment).unwrap();
+            let restored: MessageAttachment = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&restored.filename, &filename);
+            prop_assert_eq!(restored.size, size);
+            prop_assert_eq!(&restored.content_type, &content_type);
+        }
+    }
+
+    // --- P10.2: MessageEmbed roundtrip ---
+    proptest! {
+        #[test]
+        fn embed_roundtrip(
+            title in proptest::option::of("[a-zA-Z0-9 ]{1,30}"),
+            description in proptest::option::of("[a-zA-Z0-9 ]{1,50}"),
+            color in proptest::option::of(0u32..0xFFFFFF),
+        ) {
+            let embed = MessageEmbed {
+                title: title.clone(),
+                description: description.clone(),
+                color,
+                url: None,
+            };
+            let json = serde_json::to_string(&embed).unwrap();
+            let restored: MessageEmbed = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(&restored.title, &title);
+            prop_assert_eq!(&restored.description, &description);
+            prop_assert_eq!(restored.color, color);
+        }
+    }
+
+    // --- P10.3: MessageReference roundtrip ---
+    proptest! {
+        #[test]
+        fn message_reference_roundtrip(
+            msg_id in proptest::option::of(1u64..u64::MAX),
+            ch_id in proptest::option::of(1u64..u64::MAX),
+            guild_id in proptest::option::of(1u64..u64::MAX),
+        ) {
+            let reference = MessageReference {
+                message_id: msg_id.map(Id::new),
+                channel_id: ch_id.map(Id::new),
+                guild_id: guild_id.map(Id::new),
+            };
+            let json = serde_json::to_string(&reference).unwrap();
+            let restored: MessageReference = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(restored.message_id.map(|id| id.get()), msg_id);
+            prop_assert_eq!(restored.channel_id.map(|id| id.get()), ch_id);
+            prop_assert_eq!(restored.guild_id.map(|id| id.get()), guild_id);
+        }
+    }
+
+    // --- P10.4: PaneId roundtrip ---
+    proptest! {
+        #[test]
+        fn pane_id_roundtrip(val in 0u32..u32::MAX) {
+            let id = PaneId(val);
+            let json = serde_json::to_string(&id).unwrap();
+            let restored: PaneId = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(restored, id);
+        }
+    }
+
+    // --- P10.5: SplitDirection roundtrip ---
+    proptest! {
+        #[test]
+        fn split_direction_roundtrip(dir in prop_oneof![Just(SplitDirection::Horizontal), Just(SplitDirection::Vertical)]) {
+            let json = serde_json::to_string(&dir).unwrap();
+            let restored: SplitDirection = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(restored, dir);
+        }
+    }
+}

@@ -303,3 +303,50 @@ mod tests {
         assert_eq!(action, Some(Action::FocusPaneDirection(Direction::Up)));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_keycode() -> impl Strategy<Value = KeyCode> {
+        prop_oneof![
+            proptest::char::range('a', 'z').prop_map(KeyCode::Char),
+            proptest::char::range('A', 'Z').prop_map(KeyCode::Char),
+            proptest::char::range('0', '9').prop_map(KeyCode::Char),
+            Just(KeyCode::Enter),
+            Just(KeyCode::Tab),
+            Just(KeyCode::Backspace),
+            Just(KeyCode::Delete),
+            Just(KeyCode::Up),
+            Just(KeyCode::Down),
+            Just(KeyCode::Left),
+            Just(KeyCode::Right),
+            Just(KeyCode::Home),
+            Just(KeyCode::End),
+            Just(KeyCode::PageUp),
+            Just(KeyCode::PageDown),
+            Just(KeyCode::Esc),
+        ]
+    }
+
+    // --- P8.1: PanePrefix always returns to Normal ---
+    proptest! {
+        #[test]
+        fn pane_prefix_always_returns_normal(code in arb_keycode()) {
+            let key_event = KeyEvent::new(code, KeyModifiers::NONE);
+            let (_, mode) = handle_key_event(key_event, InputMode::PanePrefix);
+            prop_assert_eq!(mode, InputMode::Normal, "PanePrefix didn't return to Normal for {:?}", code);
+        }
+    }
+
+    // --- P8.2: non-Esc keys in Insert stay in Insert ---
+    proptest! {
+        #[test]
+        fn insert_non_esc_stays_insert(c in proptest::char::range('a', 'z')) {
+            let key_event = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            let (_, mode) = handle_key_event(key_event, InputMode::Insert);
+            prop_assert_eq!(mode, InputMode::Insert, "Insert mode left for char {:?}", c);
+        }
+    }
+}

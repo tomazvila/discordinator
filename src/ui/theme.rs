@@ -269,3 +269,44 @@ mod tests {
         assert_eq!(selected.bg, Some(theme.sidebar_selected_bg));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- P6.1: valid hex #RRGGBB always parses ---
+    proptest! {
+        #[test]
+        fn valid_hex_always_parses(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+            let hex = format!("#{:02X}{:02X}{:02X}", r, g, b);
+            let result = parse_color(&hex);
+            prop_assert_eq!(result, Some(Color::Rgb(r, g, b)), "Failed to parse {}", hex);
+        }
+    }
+
+    // --- P6.2: case insensitive named colors ---
+    proptest! {
+        #[test]
+        fn named_color_case_insensitive(
+            name in prop_oneof![
+                Just("red"), Just("green"), Just("blue"), Just("yellow"),
+                Just("cyan"), Just("magenta"), Just("white"), Just("black"),
+                Just("gray"), Just("grey"),
+            ]
+        ) {
+            let lower = parse_color(name);
+            let upper = parse_color(&name.to_uppercase());
+            let mixed = parse_color(&{
+                let mut s = String::new();
+                for (i, c) in name.chars().enumerate() {
+                    if i % 2 == 0 { s.extend(c.to_uppercase()); }
+                    else { s.push(c); }
+                }
+                s
+            });
+            prop_assert_eq!(lower, upper, "Case mismatch: {:?} vs {:?}", name, name.to_uppercase());
+            prop_assert_eq!(lower, mixed);
+        }
+    }
+}

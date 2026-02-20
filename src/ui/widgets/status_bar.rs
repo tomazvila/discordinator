@@ -259,8 +259,8 @@ mod tests {
         state.cache.channel_guild.insert(channel_id, guild_id);
 
         // Switch to the channel
-        state.panes[0].channel_id = Some(channel_id);
-        state.panes[0].guild_id = Some(guild_id);
+        state.focused_pane_mut().channel_id = Some(channel_id);
+        state.focused_pane_mut().guild_id = Some(guild_id);
 
         let buf = render_status_bar(&state);
         let text = buffer_text(&buf);
@@ -298,8 +298,8 @@ mod tests {
                 topic: None,
             },
         );
-        state.panes[0].channel_id = Some(channel_id);
-        state.panes[0].guild_id = None;
+        state.focused_pane_mut().channel_id = Some(channel_id);
+        state.focused_pane_mut().guild_id = None;
 
         let buf = render_status_bar(&state);
         let text = buffer_text(&buf);

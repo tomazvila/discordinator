@@ -46,7 +46,8 @@ impl HttpActor {
         request_rx: mpsc::Receiver<HttpRequest>,
         result_tx: mpsc::Sender<BackgroundResult>,
     ) -> Result<Self> {
-        let headers = anti_detection::build_http_headers(config, token);
+        let headers = anti_detection::build_http_headers(config, token)
+            .wrap_err("Failed to build anti-detection HTTP headers")?;
         let client = reqwest::Client::builder()
             .default_headers(headers.clone())
             .build()
@@ -326,6 +327,16 @@ impl HttpActor {
             .wrap_err("Failed to send typing")?;
 
         self.update_rate_limit(&route, response.headers());
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(color_eyre::eyre::eyre!(
+                "Send typing failed: {} - {}",
+                status,
+                body
+            ));
+        }
 
         Ok(())
     }

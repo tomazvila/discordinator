@@ -4,7 +4,8 @@ use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ChannelMarker, Direction, GuildMarker, Id, InputState, PaneId, ScrollState, SplitDirection,
+    ChannelMarker, Direction, GuildMarker, Id, InputState, MessageMarker, PaneId, ScrollState,
+    SplitDirection,
 };
 
 /// A pane leaf — an independent channel view.
@@ -15,6 +16,10 @@ pub struct Pane {
     pub guild_id: Option<Id<GuildMarker>>,
     pub scroll: ScrollState,
     pub input: InputState,
+    /// Index of the selected message (for reply/edit/delete). None = no selection.
+    pub selected_message: Option<usize>,
+    /// Message ID pending delete confirmation. None = not confirming.
+    pub confirming_delete: Option<Id<MessageMarker>>,
 }
 
 impl Pane {
@@ -25,6 +30,8 @@ impl Pane {
             guild_id: None,
             scroll: ScrollState::Following,
             input: InputState::default(),
+            selected_message: None,
+            confirming_delete: None,
         }
     }
 }
@@ -267,10 +274,11 @@ impl PaneManager {
         if self.root.leaf_count() <= 1 {
             return false;
         }
+        let closing_id = self.focused_pane_id;
         let leaves = self.root.leaves_in_order();
         // Find next pane to focus
-        let current_idx = leaves.iter().position(|&id| id == self.focused_pane_id);
-        let removed = self.root.remove(self.focused_pane_id);
+        let current_idx = leaves.iter().position(|&id| id == closing_id);
+        let removed = self.root.remove(closing_id);
         if removed {
             // Focus the next available pane
             let new_leaves = self.root.leaves_in_order();
@@ -284,13 +292,9 @@ impl PaneManager {
             } else if let Some(&first) = new_leaves.first() {
                 self.focused_pane_id = first;
             }
-            // Clear zoom if zoomed pane was closed
-            if self.zoom_state == Some(self.focused_pane_id) {
-                // Still valid
-            } else if let Some(zoom_id) = self.zoom_state {
-                if !self.root.contains(zoom_id) {
-                    self.zoom_state = None;
-                }
+            // Clear zoom if the closed pane was the zoomed one
+            if self.zoom_state == Some(closing_id) {
+                self.zoom_state = None;
             }
         }
         removed
@@ -483,6 +487,8 @@ impl PaneManager {
             pane.guild_id = guild_id;
             pane.scroll = ScrollState::Following;
             pane.input = InputState::default();
+            pane.selected_message = None;
+            pane.confirming_delete = None;
         }
     }
 }
@@ -1430,5 +1436,298 @@ mod tests {
 
         let viewers_200 = pm.root.panes_viewing_channel(Id::new(200));
         assert_eq!(viewers_200, vec![id1]);
+    }
+
+    #[test]
+    fn close_zoomed_pane_clears_zoom_explicit() {
+        // Verify zoom is cleared using the *closing* pane's ID, not the new focused ID.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        let id2 = pm.split(SplitDirection::Horizontal);
+        // Zoom pane id1
+        pm.focused_pane_id = id1;
+        pm.toggle_zoom();
+        assert_eq!(pm.zoom_state, Some(id1));
+
+        // Close zoomed pane — zoom must clear regardless of where focus moves
+        pm.close_focused();
+        assert!(pm.zoom_state.is_none(), "Zoom should be cleared when the zoomed pane is closed");
+        assert_ne!(pm.focused_pane_id, id1, "Focus should move away from closed pane");
+    }
+
+    #[test]
+    fn close_non_zoomed_pane_keeps_zoom() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        // Zoom pane 0
+        pm.focused_pane_id = PaneId(0);
+        pm.toggle_zoom();
+        assert_eq!(pm.zoom_state, Some(PaneId(0)));
+
+        // Close pane id1 (not the zoomed one)
+        pm.focused_pane_id = id1;
+        pm.close_focused();
+        assert_eq!(pm.zoom_state, Some(PaneId(0)), "Zoom should remain on the non-closed pane");
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy: random sequence of split operations (direction + which pane to focus before split)
+    fn split_ops(max_ops: usize) -> impl Strategy<Value = Vec<SplitDirection>> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just(SplitDirection::Horizontal),
+                Just(SplitDirection::Vertical),
+            ],
+            0..=max_ops,
+        )
+    }
+
+    /// Build a PaneManager by applying a sequence of splits (cycling focus between each).
+    fn build_pm(ops: &[SplitDirection]) -> PaneManager {
+        let mut pm = PaneManager::new();
+        for (i, &dir) in ops.iter().enumerate() {
+            // Alternate focusing different panes to create varied tree shapes
+            if i % 2 == 1 {
+                pm.focus_next();
+            }
+            pm.split(dir);
+        }
+        pm
+    }
+
+    // --- P1.1: split increases leaf_count by 1 ---
+    proptest! {
+        #[test]
+        fn split_increases_leaf_count(ops in split_ops(8), dir in prop_oneof![Just(SplitDirection::Horizontal), Just(SplitDirection::Vertical)]) {
+            let mut pm = build_pm(&ops);
+            let before = pm.pane_count();
+            pm.split(dir);
+            prop_assert_eq!(pm.pane_count(), before + 1);
+        }
+    }
+
+    // --- P1.2: split preserves all pre-existing pane IDs ---
+    proptest! {
+        #[test]
+        fn split_preserves_existing_panes(ops in split_ops(8), dir in prop_oneof![Just(SplitDirection::Horizontal), Just(SplitDirection::Vertical)]) {
+            let mut pm = build_pm(&ops);
+            let before_ids = pm.all_pane_ids();
+            pm.split(dir);
+            for id in &before_ids {
+                prop_assert!(pm.root.contains(*id), "Lost pane {:?} after split", id);
+            }
+        }
+    }
+
+    // --- P1.3: leaves_in_order count == leaf_count, all unique ---
+    proptest! {
+        #[test]
+        fn leaves_in_order_consistent(ops in split_ops(10)) {
+            let pm = build_pm(&ops);
+            let leaves = pm.root.leaves_in_order();
+            prop_assert_eq!(leaves.len(), pm.root.leaf_count());
+            // Check uniqueness
+            let mut seen = std::collections::HashSet::new();
+            for id in &leaves {
+                prop_assert!(seen.insert(*id), "Duplicate pane ID {:?}", id);
+            }
+        }
+    }
+
+    // --- P1.4: find succeeds for every leaf ---
+    proptest! {
+        #[test]
+        fn find_succeeds_for_all_leaves(ops in split_ops(8)) {
+            let pm = build_pm(&ops);
+            for id in pm.root.leaves_in_order() {
+                prop_assert!(pm.root.find(id).is_some(), "find({:?}) returned None", id);
+            }
+        }
+    }
+
+    // --- P1.5: contains agrees with find ---
+    proptest! {
+        #[test]
+        fn contains_agrees_with_find(ops in split_ops(8), probe in 0u32..20) {
+            let pm = build_pm(&ops);
+            let id = PaneId(probe);
+            prop_assert_eq!(pm.root.contains(id), pm.root.find(id).is_some());
+        }
+    }
+
+    // --- P1.6: remove decreases leaf_count by 1 (when > 1) ---
+    proptest! {
+        #[test]
+        fn remove_decreases_leaf_count(ops in split_ops(8).prop_filter("need >1 pane", |ops| !ops.is_empty())) {
+            let mut pm = build_pm(&ops);
+            if pm.pane_count() > 1 {
+                let target = pm.all_pane_ids()[0];
+                let before = pm.pane_count();
+                prop_assert!(pm.root.remove(target));
+                prop_assert_eq!(pm.root.leaf_count(), before - 1);
+            }
+        }
+    }
+
+    // --- P1.7: remove preserves all other panes ---
+    proptest! {
+        #[test]
+        fn remove_preserves_other_panes(ops in split_ops(8).prop_filter("need >1 pane", |ops| !ops.is_empty())) {
+            let mut pm = build_pm(&ops);
+            if pm.pane_count() > 1 {
+                let ids = pm.all_pane_ids();
+                let target = ids[0];
+                pm.root.remove(target);
+                for &id in &ids[1..] {
+                    prop_assert!(pm.root.contains(id), "Lost pane {:?} after removing {:?}", id, target);
+                }
+            }
+        }
+    }
+
+    // --- P1.8: close_focused always keeps >= 1 pane ---
+    proptest! {
+        #[test]
+        fn close_focused_keeps_at_least_one(ops in split_ops(8)) {
+            let mut pm = build_pm(&ops);
+            // Close all we can
+            while pm.close_focused() {}
+            prop_assert!(pm.pane_count() >= 1);
+        }
+    }
+
+    // --- P1.9: focus_next N times cycles back ---
+    proptest! {
+        #[test]
+        fn focus_next_cycles(ops in split_ops(8)) {
+            let mut pm = build_pm(&ops);
+            let n = pm.pane_count();
+            let start = pm.focused_pane_id;
+            for _ in 0..n {
+                pm.focus_next();
+            }
+            prop_assert_eq!(pm.focused_pane_id, start, "focus_next didn't cycle after {} steps", n);
+        }
+    }
+
+    // --- P1.10: focus_prev is inverse of focus_next ---
+    proptest! {
+        #[test]
+        fn focus_prev_inverse_of_next(ops in split_ops(8)) {
+            let mut pm = build_pm(&ops);
+            let start = pm.focused_pane_id;
+            pm.focus_next();
+            pm.focus_prev();
+            prop_assert_eq!(pm.focused_pane_id, start);
+        }
+    }
+
+    // --- P1.11: ratio stays in [0.1, 0.9] after resize ---
+    proptest! {
+        #[test]
+        fn resize_clamps_ratio(delta in -2.0f32..2.0) {
+            let mut pm = PaneManager::new();
+            pm.split(SplitDirection::Vertical);
+            pm.root.resize(PaneId(0), delta);
+            if let PaneNode::Split { ratio, .. } = &pm.root {
+                prop_assert!(*ratio >= 0.1 - f32::EPSILON, "ratio {} < 0.1", ratio);
+                prop_assert!(*ratio <= 0.9 + f32::EPSILON, "ratio {} > 0.9", ratio);
+            }
+        }
+    }
+
+    // --- P1.12 & P1.13: split_area conserves dimensions ---
+    proptest! {
+        #[test]
+        fn split_area_conserves_width(x in 0u16..100, y in 0u16..100, w in 1u16..200, h in 1u16..200, ratio in 0.0f32..=1.0) {
+            let area = Rect::new(x, y, w, h);
+            let (first, second) = split_area(area, SplitDirection::Vertical, ratio);
+            prop_assert_eq!(first.width + second.width, area.width,
+                "Vertical split: {}+{} != {}", first.width, second.width, area.width);
+            prop_assert_eq!(first.height, area.height);
+            prop_assert_eq!(second.height, area.height);
+        }
+
+        #[test]
+        fn split_area_conserves_height(x in 0u16..100, y in 0u16..100, w in 1u16..200, h in 1u16..200, ratio in 0.0f32..=1.0) {
+            let area = Rect::new(x, y, w, h);
+            let (first, second) = split_area(area, SplitDirection::Horizontal, ratio);
+            prop_assert_eq!(first.height + second.height, area.height,
+                "Horizontal split: {}+{} != {}", first.height, second.height, area.height);
+            prop_assert_eq!(first.width, area.width);
+            prop_assert_eq!(second.width, area.width);
+        }
+    }
+
+    // --- P1.14 & P1.15: split_area positional invariants ---
+    proptest! {
+        #[test]
+        fn split_area_positions_vertical(x in 0u16..100, y in 0u16..100, w in 1u16..200, h in 1u16..200, ratio in 0.0f32..=1.0) {
+            let area = Rect::new(x, y, w, h);
+            let (first, second) = split_area(area, SplitDirection::Vertical, ratio);
+            prop_assert_eq!(first.x, area.x);
+            prop_assert_eq!(first.y, area.y);
+            prop_assert_eq!(second.x, first.x + first.width);
+            prop_assert_eq!(second.y, area.y);
+        }
+
+        #[test]
+        fn split_area_positions_horizontal(x in 0u16..100, y in 0u16..100, w in 1u16..200, h in 1u16..200, ratio in 0.0f32..=1.0) {
+            let area = Rect::new(x, y, w, h);
+            let (first, second) = split_area(area, SplitDirection::Horizontal, ratio);
+            prop_assert_eq!(first.x, area.x);
+            prop_assert_eq!(first.y, area.y);
+            prop_assert_eq!(second.x, area.x);
+            prop_assert_eq!(second.y, first.y + first.height);
+        }
+    }
+
+    // --- P1.16: compute_positions returns leaf_count entries ---
+    proptest! {
+        #[test]
+        fn compute_positions_count(ops in split_ops(6)) {
+            let pm = build_pm(&ops);
+            let area = Rect::new(0, 0, 200, 100);
+            let positions = pm.compute_positions(area);
+            prop_assert_eq!(positions.len(), pm.pane_count());
+        }
+    }
+
+    // --- P1.17: all rects fit within given area ---
+    proptest! {
+        #[test]
+        fn compute_positions_within_area(ops in split_ops(6)) {
+            let pm = build_pm(&ops);
+            let area = Rect::new(5, 3, 200, 100);
+            let positions = pm.compute_positions(area);
+            for (id, rect) in &positions {
+                prop_assert!(rect.x >= area.x, "Pane {:?} x={} < area.x={}", id, rect.x, area.x);
+                prop_assert!(rect.y >= area.y, "Pane {:?} y={} < area.y={}", id, rect.y, area.y);
+                prop_assert!(rect.x + rect.width <= area.x + area.width,
+                    "Pane {:?} right={} > area right={}", id, rect.x + rect.width, area.x + area.width);
+                prop_assert!(rect.y + rect.height <= area.y + area.height,
+                    "Pane {:?} bottom={} > area bottom={}", id, rect.y + rect.height, area.y + area.height);
+            }
+        }
+    }
+
+    // --- P1.18: session roundtrip preserves structure ---
+    proptest! {
+        #[test]
+        fn session_roundtrip_preserves_structure(ops in split_ops(6)) {
+            let pm = build_pm(&ops);
+            let json = pm.to_session_json().unwrap();
+            let restored = PaneManager::from_session_json(&json).unwrap();
+            prop_assert_eq!(restored.pane_count(), pm.pane_count());
+            prop_assert_eq!(restored.focused_pane_id, pm.focused_pane_id);
+            let orig_ids = pm.all_pane_ids();
+            let rest_ids = restored.all_pane_ids();
+            prop_assert_eq!(orig_ids, rest_ids);
+        }
     }
 }

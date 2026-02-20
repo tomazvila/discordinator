@@ -20,6 +20,7 @@ pub struct IdentifyProperties {
     pub referring_domain_current: String,
     pub release_channel: String,
     pub client_build_number: u64,
+    pub client_event_source: Option<String>,
 }
 
 /// Build IDENTIFY properties from the Discord config section.
@@ -39,31 +40,35 @@ pub fn build_identify_properties(config: &DiscordConfig) -> IdentifyProperties {
         referring_domain_current: String::new(),
         release_channel: "stable".to_string(),
         client_build_number: config.client_build_number,
+        client_event_source: None,
     }
 }
 
 /// Build X-Super-Properties header value: base64-encoded JSON of IDENTIFY properties.
 pub fn build_super_properties(config: &DiscordConfig) -> String {
     let properties = build_identify_properties(config);
-    let json = serde_json::to_string(&properties).expect("Failed to serialize identify properties");
+    // serde_json::to_string only fails if the Serialize impl is broken (unreachable for plain structs)
+    let json = serde_json::to_string(&properties).unwrap_or_default();
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
 /// Build HTTP headers that mimic the Discord web client.
 /// These must be included on ALL REST API requests.
-pub fn build_http_headers(config: &DiscordConfig, token: &str) -> HeaderMap {
+///
+/// Returns an error if the config contains values that can't be encoded
+/// as HTTP header values (e.g., non-visible ASCII characters).
+pub fn build_http_headers(config: &DiscordConfig, token: &str) -> Result<HeaderMap, reqwest::header::InvalidHeaderValue> {
     let mut headers = HeaderMap::new();
 
     headers.insert(
         "User-Agent",
-        HeaderValue::from_str(&config.browser_user_agent)
-            .expect("Invalid User-Agent header value"),
+        HeaderValue::from_str(&config.browser_user_agent)?,
     );
 
     let super_props = build_super_properties(config);
     headers.insert(
         "X-Super-Properties",
-        HeaderValue::from_str(&super_props).expect("Invalid X-Super-Properties header value"),
+        HeaderValue::from_str(&super_props)?,
     );
 
     headers.insert(
@@ -74,10 +79,10 @@ pub fn build_http_headers(config: &DiscordConfig, token: &str) -> HeaderMap {
     // User token without "Bot " prefix — this is critical for user accounts
     headers.insert(
         "Authorization",
-        HeaderValue::from_str(token).expect("Invalid Authorization header value"),
+        HeaderValue::from_str(token)?,
     );
 
-    headers
+    Ok(headers)
 }
 
 #[cfg(test)]
@@ -128,9 +133,9 @@ mod tests {
         assert_eq!(json["release_channel"], "stable");
         assert_eq!(json["client_build_number"], 346892);
 
-        // Verify it's a JSON object with all 13 fields
+        // Verify it's a JSON object with all 14 fields
         let obj = json.as_object().unwrap();
-        assert_eq!(obj.len(), 13);
+        assert_eq!(obj.len(), 14);
     }
 
     #[test]
@@ -189,7 +194,7 @@ mod tests {
     fn http_headers_are_complete() {
         let config = test_config();
         let token = "mfa.test_token_value";
-        let headers = build_http_headers(&config, token);
+        let headers = build_http_headers(&config, token).unwrap();
 
         // Must have all 4 required headers
         assert!(headers.contains_key("User-Agent"));
@@ -201,7 +206,7 @@ mod tests {
     #[test]
     fn http_headers_user_agent_matches_config() {
         let config = test_config();
-        let headers = build_http_headers(&config, "token");
+        let headers = build_http_headers(&config, "token").unwrap();
 
         let ua = headers.get("User-Agent").unwrap().to_str().unwrap();
         assert_eq!(ua, config.browser_user_agent);
@@ -211,7 +216,7 @@ mod tests {
     fn http_headers_authorization_has_no_bot_prefix() {
         let config = test_config();
         let token = "mfa.test_token_value";
-        let headers = build_http_headers(&config, token);
+        let headers = build_http_headers(&config, token).unwrap();
 
         let auth = headers.get("Authorization").unwrap().to_str().unwrap();
         assert_eq!(auth, "mfa.test_token_value");
@@ -222,7 +227,7 @@ mod tests {
     #[test]
     fn http_headers_discord_locale_is_set() {
         let config = test_config();
-        let headers = build_http_headers(&config, "token");
+        let headers = build_http_headers(&config, "token").unwrap();
 
         let locale = headers.get("X-Discord-Locale").unwrap().to_str().unwrap();
         assert_eq!(locale, "en-US");
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn http_headers_super_properties_is_valid_base64() {
         let config = test_config();
-        let headers = build_http_headers(&config, "token");
+        let headers = build_http_headers(&config, "token").unwrap();
 
         let super_props = headers
             .get("X-Super-Properties")

@@ -94,8 +94,8 @@ pub fn insert_message(conn: &Connection, msg: &CachedMessage) -> Result<()> {
 }
 
 /// Insert multiple messages in a single transaction.
-pub fn insert_messages(conn: &Connection, messages: &[CachedMessage]) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+pub fn insert_messages(conn: &mut Connection, messages: &[CachedMessage]) -> Result<()> {
+    let tx = conn.transaction()?;
     for msg in messages {
         insert_message(&tx, msg)?;
     }
@@ -332,13 +332,13 @@ mod tests {
 
     #[test]
     fn batch_insert_messages() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let messages = vec![
             make_test_message(1, 10, "First", "2024-01-01T00:00:00Z"),
             make_test_message(2, 10, "Second", "2024-01-01T00:01:00Z"),
             make_test_message(3, 10, "Third", "2024-01-01T00:02:00Z"),
         ];
-        insert_messages(&conn, &messages).unwrap();
+        insert_messages(&mut conn, &messages).unwrap();
 
         let fetched = fetch_messages(&conn, Id::new(10), None, 50).unwrap();
         assert_eq!(fetched.len(), 3);
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn fetch_messages_with_limit() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let messages: Vec<CachedMessage> = (1..=10)
             .map(|i| {
                 make_test_message(
@@ -361,7 +361,7 @@ mod tests {
                 )
             })
             .collect();
-        insert_messages(&conn, &messages).unwrap();
+        insert_messages(&mut conn, &messages).unwrap();
 
         let fetched = fetch_messages(&conn, Id::new(10), None, 3).unwrap();
         assert_eq!(fetched.len(), 3);
@@ -373,13 +373,13 @@ mod tests {
 
     #[test]
     fn fetch_messages_before_timestamp() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let messages = vec![
             make_test_message(1, 10, "Old", "2024-01-01T00:00:00Z"),
             make_test_message(2, 10, "Middle", "2024-01-01T01:00:00Z"),
             make_test_message(3, 10, "New", "2024-01-01T02:00:00Z"),
         ];
-        insert_messages(&conn, &messages).unwrap();
+        insert_messages(&mut conn, &messages).unwrap();
 
         let fetched = fetch_messages(
             &conn,
@@ -395,13 +395,13 @@ mod tests {
 
     #[test]
     fn fetch_messages_different_channels() {
-        let conn = open_in_memory().unwrap();
+        let mut conn = open_in_memory().unwrap();
         let messages = vec![
             make_test_message(1, 10, "Channel 10", "2024-01-01T00:00:00Z"),
             make_test_message(2, 20, "Channel 20", "2024-01-01T00:00:00Z"),
             make_test_message(3, 10, "Channel 10 again", "2024-01-01T00:01:00Z"),
         ];
-        insert_messages(&conn, &messages).unwrap();
+        insert_messages(&mut conn, &messages).unwrap();
 
         let ch10 = fetch_messages(&conn, Id::new(10), None, 50).unwrap();
         assert_eq!(ch10.len(), 2);

@@ -1,15 +1,11 @@
-use std::collections::VecDeque;
-
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Modifier,
-    text::Span,
     widgets::{Block, Borders, Widget},
 };
 
 use crate::app::AppState;
-use crate::ui::widgets::{input_box::InputBox, message_view::MessageView, server_tree::ServerTree, status_bar::StatusBar};
+use crate::ui::widgets::{server_tree::ServerTree, status_bar::StatusBar};
 
 /// Render the full application layout into the given area.
 pub fn render(area: Rect, buf: &mut Buffer, state: &AppState) {
@@ -49,90 +45,14 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &AppState) {
         let tree = ServerTree::new(state);
         tree.render(sidebar_inner, buf);
 
-        render_pane_area(pane_area, buf, state);
+        crate::ui::pane_renderer::render_pane_tree(pane_area, buf, state);
     } else {
-        render_pane_area(main_area, buf, state);
+        crate::ui::pane_renderer::render_pane_tree(main_area, buf, state);
     }
 
     // Status bar
     let status = StatusBar::new(state);
     status.render(status_area, buf);
-}
-
-/// Render the pane area (for now, single pane with messages + input).
-fn render_pane_area(area: Rect, buf: &mut Buffer, state: &AppState) {
-    if area.height < 3 || area.width < 5 {
-        return;
-    }
-
-    let pane = state.focused_pane();
-
-    // Pane title
-    let title = if let (Some(guild_id), Some(channel_id)) = (pane.guild_id, pane.channel_id) {
-        let guild_name = state
-            .cache
-            .guilds
-            .get(&guild_id)
-            .map(|g| g.name.as_str())
-            .unwrap_or("Unknown");
-        let channel_name = state.cache.resolve_channel_name(channel_id);
-        format!(" {} > #{} ", guild_name, channel_name)
-    } else if let Some(channel_id) = pane.channel_id {
-        format!(" #{} ", state.cache.resolve_channel_name(channel_id))
-    } else {
-        " Discordinator ".to_string()
-    };
-
-    let border_style = state.theme.active_border_style();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(title, border_style.add_modifier(Modifier::BOLD)));
-
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    if inner.height < 2 {
-        return;
-    }
-
-    // Split inner into message area + input area
-    let input_height = if pane.input.reply_to.is_some() || pane.input.editing.is_some() {
-        2 // header + input line
-    } else {
-        1
-    };
-
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),               // messages
-            Constraint::Length(input_height),  // input box
-        ])
-        .split(inner);
-
-    let message_area = vertical[0];
-    let input_area = vertical[1];
-
-    // Render messages
-    let empty_deque = VecDeque::new();
-    let messages = pane
-        .channel_id
-        .and_then(|id| state.cache.messages.get(&id))
-        .unwrap_or(&empty_deque);
-
-    let msg_view = MessageView::new(
-        messages,
-        &pane.scroll,
-        pane.selected_message,
-        &state.theme,
-        &state.cache,
-    );
-    msg_view.render(message_area, buf);
-
-    // Render input box
-    let input = InputBox::new(state);
-    input.render(input_area, buf);
 }
 
 /// Calculate the layout areas for testing purposes.
@@ -183,6 +103,7 @@ pub struct LayoutAreas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use crate::config::AppConfig;
     use crate::domain::types::*;
 
@@ -279,8 +200,8 @@ mod tests {
             },
         );
         state.cache.channel_guild.insert(channel_id, guild_id);
-        state.panes[0].channel_id = Some(channel_id);
-        state.panes[0].guild_id = Some(guild_id);
+        state.focused_pane_mut().channel_id = Some(channel_id);
+        state.focused_pane_mut().guild_id = Some(guild_id);
 
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -304,7 +225,7 @@ mod tests {
     fn render_with_messages() {
         let mut state = AppState::new(AppConfig::default());
         let channel_id = Id::new(10);
-        state.panes[0].channel_id = Some(channel_id);
+        state.focused_pane_mut().channel_id = Some(channel_id);
 
         let mut messages = VecDeque::new();
         messages.push_back(CachedMessage {
@@ -356,5 +277,60 @@ mod tests {
         let area = Rect::new(0, 0, 10, 5);
         let mut buf = Buffer::empty(area);
         render(area, &mut buf, &state);
+    }
+
+    #[test]
+    fn render_split_panes_both_visible() {
+        let mut state = AppState::new(AppConfig::default());
+        state.sidebar_visible = false;
+
+        // Set up two channels
+        let ch1 = Id::new(10);
+        let ch2 = Id::new(20);
+        state.cache.channels.insert(ch1, CachedChannel {
+            id: ch1,
+            guild_id: None,
+            name: "alpha".to_string(),
+            kind: twilight_model::channel::ChannelType::GuildText,
+            position: 0,
+            parent_id: None,
+            topic: None,
+        });
+        state.cache.channels.insert(ch2, CachedChannel {
+            id: ch2,
+            guild_id: None,
+            name: "beta".to_string(),
+            kind: twilight_model::channel::ChannelType::GuildText,
+            position: 0,
+            parent_id: None,
+            topic: None,
+        });
+
+        // Assign channel to first pane, split, assign channel to second pane
+        state.pane_manager.assign_channel(ch1, None);
+        let id1 = state.pane_manager.split(SplitDirection::Vertical);
+        state.pane_manager.focused_pane_id = id1;
+        state.pane_manager.assign_channel(ch2, None);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(area, &mut buf, &state);
+
+        // Both channel names should appear in the rendered buffer
+        let mut found_alpha = false;
+        let mut found_beta = false;
+        for y in 0..24 {
+            let line: String = (0..80)
+                .map(|x| buf[(x, y as u16)].symbol().to_string())
+                .collect::<String>();
+            if line.contains("alpha") {
+                found_alpha = true;
+            }
+            if line.contains("beta") {
+                found_beta = true;
+            }
+        }
+        assert!(found_alpha, "Should show first pane's channel name 'alpha'");
+        assert!(found_beta, "Should show second pane's channel name 'beta'");
     }
 }

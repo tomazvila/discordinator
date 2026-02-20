@@ -27,34 +27,6 @@ pub struct SidebarState {
     pub collapsed_guilds: std::collections::HashSet<Id<GuildMarker>>,
 }
 
-/// State for a single pane (leaf in the pane tree).
-#[derive(Debug, Clone)]
-pub struct PaneState {
-    pub id: PaneId,
-    pub channel_id: Option<Id<ChannelMarker>>,
-    pub guild_id: Option<Id<GuildMarker>>,
-    pub scroll: ScrollState,
-    pub input: InputState,
-    /// Index of the selected message (for reply/edit/delete). None = no selection.
-    pub selected_message: Option<usize>,
-    /// Message ID pending delete confirmation. None = not confirming.
-    pub confirming_delete: Option<Id<MessageMarker>>,
-}
-
-impl PaneState {
-    pub fn new(id: PaneId) -> Self {
-        Self {
-            id,
-            channel_id: None,
-            guild_id: None,
-            scroll: ScrollState::Following,
-            input: InputState::default(),
-            selected_message: None,
-            confirming_delete: None,
-        }
-    }
-}
-
 /// Top-level application state. Owned exclusively by the main loop.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -62,10 +34,7 @@ pub struct AppState {
     pub cache: DiscordCache,
     pub connection: ConnectionState,
 
-    // UI state — flat pane list (used by existing UI code)
-    pub panes: Vec<PaneState>,
-    pub focused_pane: usize,
-    // Pane tree manager (used by pane_renderer for split pane rendering)
+    // UI state — pane tree is the single source of truth
     pub pane_manager: PaneManager,
     pub sidebar: SidebarState,
     pub sidebar_visible: bool,
@@ -97,8 +66,6 @@ impl AppState {
         Self {
             cache: DiscordCache::default(),
             connection: ConnectionState::Disconnected,
-            panes: vec![PaneState::new(PaneId(0))],
-            focused_pane: 0,
             pane_manager: PaneManager::new(),
             sidebar: SidebarState::default(),
             sidebar_visible,
@@ -112,13 +79,13 @@ impl AppState {
     }
 
     /// Get the currently focused pane.
-    pub fn focused_pane(&self) -> &PaneState {
-        &self.panes[self.focused_pane]
+    pub fn focused_pane(&self) -> &crate::domain::pane::Pane {
+        self.pane_manager.focused_pane().expect("always has at least one pane")
     }
 
     /// Get the currently focused pane mutably.
-    pub fn focused_pane_mut(&mut self) -> &mut PaneState {
-        &mut self.panes[self.focused_pane]
+    pub fn focused_pane_mut(&mut self) -> &mut crate::domain::pane::Pane {
+        self.pane_manager.focused_pane_mut().expect("always has at least one pane")
     }
 }
 
@@ -271,13 +238,6 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         // Navigation
         Action::SwitchChannel(channel_id) => {
             let guild_id = state.cache.channel_guild.get(&channel_id).copied();
-            // Update flat pane list (legacy)
-            let pane = state.focused_pane_mut();
-            pane.channel_id = Some(channel_id);
-            pane.guild_id = guild_id;
-            pane.scroll = ScrollState::Following;
-            pane.selected_message = None;
-            // Update pane tree manager
             state.pane_manager.assign_channel(channel_id, guild_id);
             true
         }
@@ -310,8 +270,13 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         }
 
         Action::ScrollToTop => {
-            let pane = state.focused_pane_mut();
-            pane.scroll = ScrollState::Manual { offset: usize::MAX };
+            // Read channel_id immutably first, then look up message count,
+            // then mutate the pane's scroll state.
+            let channel_id = state.focused_pane().channel_id;
+            let max_offset = channel_id
+                .and_then(|ch| state.cache.messages.get(&ch).map(|msgs| msgs.len()))
+                .unwrap_or(0);
+            state.focused_pane_mut().scroll = ScrollState::Manual { offset: max_offset };
             true
         }
 
@@ -332,20 +297,16 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
             true
         }
 
-        // Pane operations (basic for now, full pane tree in Tasks 31-37)
+        // Pane operations
         Action::FocusNextPane => {
-            if !state.panes.is_empty() {
-                state.focused_pane = (state.focused_pane + 1) % state.panes.len();
-            }
+            state.pane_manager.focus_next();
             true
         }
 
         Action::FocusPaneDirection(_dir) => {
-            // Full directional focus requires pane tree layout (Task 32)
-            // For now, just cycle
-            if !state.panes.is_empty() {
-                state.focused_pane = (state.focused_pane + 1) % state.panes.len();
-            }
+            // Directional focus needs rendered positions which we don't have here.
+            // Fall back to cycling.
+            state.pane_manager.focus_next();
             true
         }
 
@@ -365,12 +326,21 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         Action::EditMessage { .. } => true,
         Action::DeleteMessage { .. } => true,
 
-        // Pane operations (stubs — full impl in Tasks 31-37)
-        Action::SplitPane(_) => true,
-        Action::ClosePane => true,
-        Action::ResizePane(_, _) => true,
-        Action::ToggleZoom => true,
-        Action::SwapPane(_) => true,
+        Action::SplitPane(direction) => {
+            state.pane_manager.split(direction);
+            true
+        }
+        Action::ClosePane => {
+            state.pane_manager.close_focused()
+        }
+        Action::ResizePane(dir, delta) => {
+            state.pane_manager.resize_focused(dir, delta)
+        }
+        Action::ToggleZoom => {
+            state.pane_manager.toggle_zoom();
+            true
+        }
+        Action::SwapPane(_) => true, // Not yet implemented in pane_manager
 
         // Message interaction (from features worker)
         // Note: read from cache/pane immutably first, then mutate, to satisfy borrow checker
@@ -397,12 +367,15 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
                         .map(|msg| (msg.id, msg.content.clone()))
                 }));
             if let Some((id, content)) = edit_info {
-                let len = content.len();
+                let byte_len = content.len();
+                let display_width: usize = content.chars()
+                    .map(crate::ui::widgets::input_box::unicode_width)
+                    .sum();
                 let pane = state.focused_pane_mut();
                 pane.input.editing = Some(id);
                 pane.input.content = content;
-                pane.input.cursor_pos = len;
-                pane.input.cursor_col = len;
+                pane.input.cursor_pos = byte_len;
+                pane.input.cursor_col = display_width;
                 state.input_mode = InputMode::Insert;
                 true
             } else {
@@ -439,10 +412,15 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
             true
         }
         Action::SelectMessageUp => {
+            // selected_message is an index from the bottom (0 = newest).
+            // "Up" = visually up = older messages = increase index.
+            let max_idx = state.focused_pane().channel_id
+                .and_then(|ch| state.cache.messages.get(&ch).map(|msgs| msgs.len().saturating_sub(1)))
+                .unwrap_or(0);
             let pane = state.focused_pane_mut();
             if let Some(idx) = pane.selected_message {
-                if idx > 0 {
-                    pane.selected_message = Some(idx - 1);
+                if idx < max_idx {
+                    pane.selected_message = Some(idx + 1);
                 }
             } else {
                 pane.selected_message = Some(0);
@@ -450,10 +428,17 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
             true
         }
         Action::SelectMessageDown => {
+            // "Down" = visually down = newer messages = decrease index.
             let pane = state.focused_pane_mut();
             if let Some(idx) = pane.selected_message {
-                pane.selected_message = Some(idx + 1);
+                if idx > 0 {
+                    pane.selected_message = Some(idx - 1);
+                } else {
+                    // Already at newest, deselect
+                    pane.selected_message = None;
+                }
             }
+            // No else: Down without selection is a no-op
             true
         }
 
@@ -472,8 +457,8 @@ mod tests {
     #[test]
     fn new_state_has_single_pane() {
         let state = test_state();
-        assert_eq!(state.panes.len(), 1);
-        assert_eq!(state.focused_pane, 0);
+        assert_eq!(state.pane_manager.pane_count(), 1);
+        assert_eq!(state.pane_manager.focused_pane_id, PaneId(0));
     }
 
     #[test]
@@ -584,12 +569,11 @@ mod tests {
     #[test]
     fn action_scroll_to_top() {
         let mut state = test_state();
+        // No messages → offset is 0 (clamped to message count)
         apply_action(Action::ScrollToTop, &mut state);
         assert_eq!(
             state.focused_pane().scroll,
-            ScrollState::Manual {
-                offset: usize::MAX
-            }
+            ScrollState::Manual { offset: 0 }
         );
     }
 
@@ -603,19 +587,26 @@ mod tests {
 
     #[test]
     fn action_focus_next_pane_wraps() {
+        use crate::domain::types::SplitDirection;
         let mut state = test_state();
-        state.panes.push(PaneState::new(PaneId(1)));
-        state.panes.push(PaneState::new(PaneId(2)));
-        assert_eq!(state.focused_pane, 0);
+        apply_action(Action::SplitPane(SplitDirection::Vertical), &mut state);
+        apply_action(Action::SplitPane(SplitDirection::Vertical), &mut state);
+        assert_eq!(state.pane_manager.pane_count(), 3);
+
+        let initial_id = state.pane_manager.focused_pane_id;
 
         apply_action(Action::FocusNextPane, &mut state);
-        assert_eq!(state.focused_pane, 1);
+        let second_id = state.pane_manager.focused_pane_id;
+        assert_ne!(second_id, initial_id);
 
         apply_action(Action::FocusNextPane, &mut state);
-        assert_eq!(state.focused_pane, 2);
+        let third_id = state.pane_manager.focused_pane_id;
+        assert_ne!(third_id, initial_id);
+        assert_ne!(third_id, second_id);
 
         apply_action(Action::FocusNextPane, &mut state);
-        assert_eq!(state.focused_pane, 0); // wraps
+        let wrapped_id = state.pane_manager.focused_pane_id;
+        assert_eq!(wrapped_id, initial_id); // wraps back
     }
 
     #[test]
@@ -681,14 +672,16 @@ mod tests {
     }
 
     #[test]
-    fn pane_state_new_defaults() {
-        let pane = PaneState::new(PaneId(42));
+    fn pane_new_defaults() {
+        use crate::domain::pane::Pane;
+        let pane = Pane::new(PaneId(42));
         assert_eq!(pane.id, PaneId(42));
         assert!(pane.channel_id.is_none());
         assert!(pane.guild_id.is_none());
         assert_eq!(pane.scroll, ScrollState::Following);
         assert!(pane.input.content.is_empty());
         assert!(pane.selected_message.is_none());
+        assert!(pane.confirming_delete.is_none());
     }
 
     #[test]

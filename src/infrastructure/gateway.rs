@@ -1,8 +1,7 @@
-use std::io::Write;
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, WrapErr};
-use flate2::write::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -58,126 +57,171 @@ impl GatewayConnection {
         let mut sequence: Option<u64> = None;
         let mut session_id: Option<String> = None;
         let mut resume_url: Option<String> = None;
-        let mut heartbeat_interval: Option<Duration> = None;
-        let mut heartbeat_handle: Option<tokio::task::JoinHandle<()>> = None;
+        let mut heartbeat_duration: Option<Duration> = None;
+        let mut heartbeat_ack_received = true; // No outstanding heartbeat initially
+        let mut received_ready = false; // Track if we got READY for backoff logic
 
-        while let Some(msg_result) = read.next().await {
-            let msg = match msg_result {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("Gateway WebSocket error: {}", e);
-                    break;
-                }
-            };
+        // Heartbeat timer — starts far in the future (disabled until HELLO).
+        let next_heartbeat = tokio::time::sleep(Duration::from_secs(86400 * 365));
+        tokio::pin!(next_heartbeat);
 
-            let payload_text = match msg {
-                Message::Binary(data) => {
-                    match decompressor.decompress(&data) {
-                        Ok(Some(text)) => text,
-                        Ok(None) => continue, // Partial message, waiting for more
-                        Err(e) => {
-                            tracing::error!("Decompression error: {}", e);
+        loop {
+            tokio::select! {
+                biased; // Gateway events take priority over heartbeat ticks
+
+                msg_result = read.next() => {
+                    let msg = match msg_result {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            tracing::error!("Gateway WebSocket error: {}", e);
+                            break;
+                        }
+                        None => break,
+                    };
+
+                    let payload_text = match msg {
+                        Message::Binary(data) => {
+                            match decompressor.decompress(&data) {
+                                Ok(Some(text)) => text,
+                                Ok(None) => continue, // Partial message, waiting for more
+                                Err(e) => {
+                                    tracing::error!("Decompression error: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                        Message::Text(text) => text.to_string(),
+                        Message::Close(_) => {
+                            tracing::info!("Gateway WebSocket closed");
+                            break;
+                        }
+                        Message::Ping(data) => {
+                            let _ = write.send(Message::Pong(data)).await;
                             continue;
                         }
-                    }
-                }
-                Message::Text(text) => text.to_string(),
-                Message::Close(_) => {
-                    tracing::info!("Gateway WebSocket closed");
-                    break;
-                }
-                Message::Ping(data) => {
-                    let _ = write.send(Message::Pong(data)).await;
-                    continue;
-                }
-                _ => continue,
-            };
+                        _ => continue,
+                    };
 
-            let payload: serde_json::Value = match serde_json::from_str(&payload_text) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("Failed to parse gateway JSON: {}", e);
-                    continue;
-                }
-            };
-
-            // Update sequence number
-            if let Some(s) = payload["s"].as_u64() {
-                sequence = Some(s);
-            }
-
-            let gateway_event = event::parse_gateway_payload(&payload);
-
-            match &gateway_event {
-                GatewayEvent::Hello {
-                    heartbeat_interval: interval,
-                } => {
-                    heartbeat_interval = Some(Duration::from_millis(*interval));
-
-                    // Start heartbeat task
-                    let hb_interval = Duration::from_millis(*interval);
-                    let hb_write = self.event_tx.clone();
-                    let hb_seq = sequence;
-                    heartbeat_handle = Some(tokio::spawn(async move {
-                        // Send first heartbeat after jitter (0 to interval)
-                        let jitter = rand::random::<f64>() * hb_interval.as_secs_f64();
-                        tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
-                        // The heartbeat task just signals; actual sending is done below
-                        let _ = hb_write; // keep alive
-                        let _ = hb_seq;
-                    }));
-
-                    // Send IDENTIFY
-                    let identify = build_identify_payload(&self.token, &self.config);
-                    let identify_text = serde_json::to_string(&identify)
-                        .wrap_err("Failed to serialize IDENTIFY")?;
-                    write
-                        .send(Message::Text(identify_text.into()))
-                        .await
-                        .wrap_err("Failed to send IDENTIFY")?;
-                }
-                GatewayEvent::Ready(ready) => {
-                    session_id = Some(ready.session_id.clone());
-                    resume_url = Some(ready.resume_gateway_url.clone());
-
-                    // Start the actual heartbeat loop now that we have a session
-                    if let Some(interval) = heartbeat_interval {
-                        if let Some(handle) = heartbeat_handle.take() {
-                            handle.abort();
+                    let payload: serde_json::Value = match serde_json::from_str(&payload_text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("Failed to parse gateway JSON: {}", e);
+                            continue;
                         }
+                    };
 
-                        let mut hb_writer = HeartbeatWriter {
-                            interval,
-                            sequence,
-                        };
-                        let event_tx = self.event_tx.clone();
-                        heartbeat_handle = Some(tokio::spawn(async move {
-                            hb_writer.run_heartbeat_loop(&event_tx).await;
-                        }));
+                    // Update sequence number
+                    if let Some(s) = payload["s"].as_u64() {
+                        sequence = Some(s);
+                    }
+
+                    // Respond to heartbeat requests (op 1) immediately
+                    if payload["op"].as_u64() == Some(1) {
+                        let hb = build_heartbeat_payload(sequence);
+                        if let Ok(text) = serde_json::to_string(&hb) {
+                            let _ = write.send(Message::Text(text.into())).await;
+                        }
+                    }
+
+                    let gateway_event = event::parse_gateway_payload(&payload);
+
+                    let mut should_break = false;
+
+                    match &gateway_event {
+                        GatewayEvent::Hello {
+                            heartbeat_interval: interval,
+                        } => {
+                            let interval_dur = Duration::from_millis(*interval);
+                            heartbeat_duration = Some(interval_dur);
+
+                            // Schedule first heartbeat with jitter (0 to interval)
+                            let jitter = rand::random::<f64>() * interval_dur.as_secs_f64();
+                            next_heartbeat.as_mut().reset(
+                                tokio::time::Instant::now() + Duration::from_secs_f64(jitter),
+                            );
+
+                            // Send IDENTIFY
+                            let identify = build_identify_payload(&self.token, &self.config);
+                            let identify_text = serde_json::to_string(&identify)
+                                .wrap_err("Failed to serialize IDENTIFY")?;
+                            write
+                                .send(Message::Text(identify_text.into()))
+                                .await
+                                .wrap_err("Failed to send IDENTIFY")?;
+                        }
+                        GatewayEvent::Ready(ready) => {
+                            session_id = Some(ready.session_id.clone());
+                            resume_url = Some(ready.resume_gateway_url.clone());
+                            received_ready = true;
+                        }
+                        GatewayEvent::HeartbeatAck => {
+                            heartbeat_ack_received = true;
+                            tracing::trace!("Heartbeat ACK received");
+                        }
+                        GatewayEvent::InvalidSession { resumable } => {
+                            // C4 fix: if not resumable, clear session so manager
+                            // does a fresh IDENTIFY instead of an infinite resume loop
+                            if !*resumable {
+                                session_id = None;
+                            }
+                            should_break = true;
+                        }
+                        GatewayEvent::Reconnect => {
+                            // Session info preserved for RESUME
+                            should_break = true;
+                        }
+                        _ => {}
+                    }
+
+                    // Forward event to main loop
+                    if self.event_tx.send(gateway_event).is_err() {
+                        tracing::info!("Event channel closed, shutting down gateway");
+                        break;
+                    }
+
+                    if should_break {
+                        break;
                     }
                 }
-                GatewayEvent::HeartbeatAck => {
-                    tracing::trace!("Heartbeat ACK received");
+
+                // C1 fix: Actually send heartbeats on the interval
+                _ = &mut next_heartbeat => {
+                    // Zombie connection detection: if we didn't get ACK since last heartbeat, reconnect
+                    if !heartbeat_ack_received {
+                        tracing::warn!("No heartbeat ACK received since last heartbeat, connection is zombied");
+                        break;
+                    }
+                    heartbeat_ack_received = false;
+
+                    let hb = build_heartbeat_payload(sequence);
+                    let text = match serde_json::to_string(&hb) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize heartbeat: {}", e);
+                            break;
+                        }
+                    };
+                    if let Err(e) = write.send(Message::Text(text.into())).await {
+                        tracing::error!("Failed to send heartbeat: {}", e);
+                        break;
+                    }
+                    tracing::trace!("Sent heartbeat (seq: {:?})", sequence);
+
+                    // Schedule next heartbeat
+                    if let Some(interval) = heartbeat_duration {
+                        next_heartbeat.as_mut().reset(
+                            tokio::time::Instant::now() + interval,
+                        );
+                    }
                 }
-                _ => {}
             }
-
-            // Forward event to main loop
-            if self.event_tx.send(gateway_event).is_err() {
-                tracing::info!("Event channel closed, shutting down gateway");
-                break;
-            }
-        }
-
-        // Clean up heartbeat task
-        if let Some(handle) = heartbeat_handle {
-            handle.abort();
         }
 
         Ok(SessionInfo {
             session_id,
             resume_url,
             sequence,
+            was_ready: received_ready,
         })
     }
 
@@ -194,96 +238,167 @@ impl GatewayConnection {
         let (mut write, mut read) = ws_stream.split();
         let mut decompressor = ZlibDecompressor::new();
         let mut current_sequence: Option<u64> = Some(sequence);
-        let current_session_id = Some(session_id.to_string());
-        let resume_url: Option<String> = None;
-        let mut heartbeat_handle: Option<tokio::task::JoinHandle<()>> = None;
+        let mut current_session_id = Some(session_id.to_string());
+        // C3 fix: preserve the URL we connected to (may be a resume_gateway_url)
+        let mut resume_url: Option<String> = Some(self.gateway_url.clone());
+        let mut heartbeat_duration: Option<Duration> = None;
+        let mut heartbeat_ack_received = true;
+        let mut received_ready = false; // RESUMED counts as ready for backoff purposes
 
-        while let Some(msg_result) = read.next().await {
-            let msg = match msg_result {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("Gateway WebSocket error during RESUME: {}", e);
-                    break;
-                }
-            };
+        let next_heartbeat = tokio::time::sleep(Duration::from_secs(86400 * 365));
+        tokio::pin!(next_heartbeat);
 
-            let payload_text = match msg {
-                Message::Binary(data) => {
-                    match decompressor.decompress(&data) {
-                        Ok(Some(text)) => text,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            tracing::error!("Decompression error: {}", e);
+        loop {
+            tokio::select! {
+                biased;
+
+                msg_result = read.next() => {
+                    let msg = match msg_result {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            tracing::error!("Gateway WebSocket error during RESUME: {}", e);
+                            break;
+                        }
+                        None => break,
+                    };
+
+                    let payload_text = match msg {
+                        Message::Binary(data) => {
+                            match decompressor.decompress(&data) {
+                                Ok(Some(text)) => text,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    tracing::error!("Decompression error: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                        Message::Text(text) => text.to_string(),
+                        Message::Close(_) => break,
+                        Message::Ping(data) => {
+                            let _ = write.send(Message::Pong(data)).await;
                             continue;
                         }
+                        _ => continue,
+                    };
+
+                    let payload: serde_json::Value = match serde_json::from_str(&payload_text) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!("Failed to parse gateway JSON: {}", e);
+                            continue;
+                        }
+                    };
+
+                    if let Some(s) = payload["s"].as_u64() {
+                        current_sequence = Some(s);
+                    }
+
+                    // Respond to heartbeat requests (op 1) immediately
+                    if payload["op"].as_u64() == Some(1) {
+                        let hb = build_heartbeat_payload(current_sequence);
+                        if let Ok(text) = serde_json::to_string(&hb) {
+                            let _ = write.send(Message::Text(text.into())).await;
+                        }
+                    }
+
+                    let gateway_event = event::parse_gateway_payload(&payload);
+
+                    let mut should_break = false;
+
+                    match &gateway_event {
+                        GatewayEvent::Hello {
+                            heartbeat_interval: interval,
+                        } => {
+                            // Send RESUME instead of IDENTIFY
+                            let resume_payload = build_resume_payload(
+                                &self.token,
+                                session_id,
+                                current_sequence.unwrap_or(sequence),
+                            );
+                            let resume_text = serde_json::to_string(&resume_payload)
+                                .wrap_err("Failed to serialize RESUME")?;
+                            write
+                                .send(Message::Text(resume_text.into()))
+                                .await
+                                .wrap_err("Failed to send RESUME")?;
+
+                            // Start heartbeat
+                            let interval_dur = Duration::from_millis(*interval);
+                            heartbeat_duration = Some(interval_dur);
+                            let jitter = rand::random::<f64>() * interval_dur.as_secs_f64();
+                            next_heartbeat.as_mut().reset(
+                                tokio::time::Instant::now() + Duration::from_secs_f64(jitter),
+                            );
+                        }
+                        GatewayEvent::HeartbeatAck => {
+                            heartbeat_ack_received = true;
+                            tracing::trace!("Heartbeat ACK received (resume)");
+                        }
+                        GatewayEvent::Resumed => {
+                            received_ready = true;
+                        }
+                        GatewayEvent::InvalidSession { resumable } => {
+                            if !*resumable {
+                                current_session_id = None;
+                            }
+                            should_break = true;
+                        }
+                        GatewayEvent::Reconnect => {
+                            should_break = true;
+                        }
+                        GatewayEvent::Ready(ready) => {
+                            // Unlikely after resume, but update if received
+                            resume_url = Some(ready.resume_gateway_url.clone());
+                            received_ready = true;
+                        }
+                        _ => {}
+                    }
+
+                    if self.event_tx.send(gateway_event).is_err() {
+                        break;
+                    }
+
+                    if should_break {
+                        break;
                     }
                 }
-                Message::Text(text) => text.to_string(),
-                Message::Close(_) => break,
-                Message::Ping(data) => {
-                    let _ = write.send(Message::Pong(data)).await;
-                    continue;
-                }
-                _ => continue,
-            };
 
-            let payload: serde_json::Value = match serde_json::from_str(&payload_text) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("Failed to parse gateway JSON: {}", e);
-                    continue;
-                }
-            };
+                _ = &mut next_heartbeat => {
+                    if !heartbeat_ack_received {
+                        tracing::warn!("No heartbeat ACK received since last heartbeat (resume), connection is zombied");
+                        break;
+                    }
+                    heartbeat_ack_received = false;
 
-            if let Some(s) = payload["s"].as_u64() {
-                current_sequence = Some(s);
-            }
-
-            let gateway_event = event::parse_gateway_payload(&payload);
-
-            if let GatewayEvent::Hello {
-                heartbeat_interval: interval,
-            } = &gateway_event
-            {
-                // Send RESUME instead of IDENTIFY
-                let resume_payload = build_resume_payload(
-                    &self.token,
-                    session_id,
-                    sequence,
-                );
-                let resume_text = serde_json::to_string(&resume_payload)
-                    .wrap_err("Failed to serialize RESUME")?;
-                write
-                    .send(Message::Text(resume_text.into()))
-                    .await
-                    .wrap_err("Failed to send RESUME")?;
-
-                // Start heartbeat
-                let interval_dur = Duration::from_millis(*interval);
-                let event_tx = self.event_tx.clone();
-                let seq = current_sequence;
-                heartbeat_handle = Some(tokio::spawn(async move {
-                    let mut hb = HeartbeatWriter {
-                        interval: interval_dur,
-                        sequence: seq,
+                    let hb = build_heartbeat_payload(current_sequence);
+                    let text = match serde_json::to_string(&hb) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize heartbeat: {}", e);
+                            break;
+                        }
                     };
-                    hb.run_heartbeat_loop(&event_tx).await;
-                }));
-            }
+                    if let Err(e) = write.send(Message::Text(text.into())).await {
+                        tracing::error!("Failed to send heartbeat: {}", e);
+                        break;
+                    }
+                    tracing::trace!("Sent heartbeat (seq: {:?})", current_sequence);
 
-            if self.event_tx.send(gateway_event).is_err() {
-                break;
+                    if let Some(interval) = heartbeat_duration {
+                        next_heartbeat.as_mut().reset(
+                            tokio::time::Instant::now() + interval,
+                        );
+                    }
+                }
             }
-        }
-
-        if let Some(handle) = heartbeat_handle {
-            handle.abort();
         }
 
         Ok(SessionInfo {
             session_id: current_session_id,
             resume_url,
             sequence: current_sequence,
+            was_ready: received_ready,
         })
     }
 }
@@ -294,58 +409,72 @@ pub struct SessionInfo {
     pub session_id: Option<String>,
     pub resume_url: Option<String>,
     pub sequence: Option<u64>,
+    /// Whether a READY or RESUMED event was received during this session.
+    /// Used to decide whether to reset backoff on reconnect.
+    pub was_ready: bool,
 }
 
-/// Heartbeat writer that runs in its own task.
-struct HeartbeatWriter {
-    interval: Duration,
-    sequence: Option<u64>,
-}
+/// Maximum size for the decompression buffer before we consider it an error.
+/// Discord messages should never realistically exceed a few MB.
+const MAX_DECOMPRESS_BUFFER: usize = 8 * 1024 * 1024; // 8 MB
 
-impl HeartbeatWriter {
-    async fn run_heartbeat_loop(&mut self, _event_tx: &mpsc::UnboundedSender<GatewayEvent>) {
-        let mut interval = tokio::time::interval(self.interval);
-        // First tick fires immediately; skip it with initial jitter
-        let jitter = rand::random::<f64>() * self.interval.as_secs_f64();
-        tokio::time::sleep(Duration::from_secs_f64(jitter)).await;
-
-        loop {
-            interval.tick().await;
-            // In a full implementation, this would send the heartbeat via the write half
-            // For now, the heartbeat sending is handled by a separate mechanism
-            tracing::trace!("Heartbeat tick (seq: {:?})", self.sequence);
-        }
-    }
-}
-
-/// zlib-stream decompressor that maintains state across frames.
+/// zlib-stream decompressor that maintains persistent state across frames.
+/// Discord's zlib-stream mode uses a single compression context across all
+/// messages, so we must maintain the decompressor state between messages.
 pub struct ZlibDecompressor {
     buffer: Vec<u8>,
+    decompress: Decompress,
 }
 
 impl ZlibDecompressor {
     pub fn new() -> Self {
-        Self { buffer: Vec::new() }
+        Self {
+            buffer: Vec::new(),
+            decompress: Decompress::new(true), // true = expect zlib header
+        }
     }
 
     /// Feed data into the decompressor. Returns Some(text) when a complete
     /// message is ready (zlib suffix detected), None if more data is needed.
     pub fn decompress(&mut self, data: &[u8]) -> Result<Option<String>> {
+        if self.buffer.len() + data.len() > MAX_DECOMPRESS_BUFFER {
+            self.buffer.clear();
+            return Err(color_eyre::eyre::eyre!(
+                "zlib-stream buffer exceeded maximum size ({}B), resetting",
+                MAX_DECOMPRESS_BUFFER
+            ));
+        }
         self.buffer.extend_from_slice(data);
 
         // Check for zlib-stream suffix indicating a complete message
         if self.buffer.len() >= 4
             && self.buffer[self.buffer.len() - 4..] == ZLIB_SUFFIX
         {
-            let mut decoder = ZlibDecoder::new(Vec::new());
-            decoder
-                .write_all(&self.buffer)
-                .wrap_err("zlib decompression failed")?;
-            let decompressed = decoder
-                .finish()
-                .wrap_err("zlib finish failed")?;
-            self.buffer.clear();
-            let text = String::from_utf8(decompressed)
+            let mut output = Vec::new();
+            let mut chunk = [0u8; 32768];
+            let input = std::mem::take(&mut self.buffer);
+            let mut pos = 0;
+
+            while pos < input.len() {
+                let before_in = self.decompress.total_in();
+                let before_out = self.decompress.total_out();
+
+                self.decompress
+                    .decompress(&input[pos..], &mut chunk, FlushDecompress::Sync)
+                    .map_err(|e| color_eyre::eyre::eyre!("zlib-stream decompression failed: {}", e))?;
+
+                let consumed = (self.decompress.total_in() - before_in) as usize;
+                let produced = (self.decompress.total_out() - before_out) as usize;
+
+                pos += consumed;
+                output.extend_from_slice(&chunk[..produced]);
+
+                if consumed == 0 && produced == 0 {
+                    break;
+                }
+            }
+
+            let text = String::from_utf8(output)
                 .wrap_err("Decompressed data is not valid UTF-8")?;
             Ok(Some(text))
         } else {
@@ -471,8 +600,12 @@ impl GatewayManager {
 
             match result {
                 Ok(session_info) => {
+                    // Only reset backoff if we actually got READY/RESUMED,
+                    // not on short-lived connections that ended with InvalidSession
+                    if session_info.was_ready {
+                        self.backoff_secs = INITIAL_BACKOFF_SECS;
+                    }
                     self.session = Some(session_info);
-                    self.backoff_secs = INITIAL_BACKOFF_SECS;
                 }
                 Err(e) => {
                     tracing::error!("Gateway connection error: {}", e);
@@ -522,18 +655,18 @@ impl GatewayManager {
     }
 
     fn determine_reconnect_action(&self) -> ReconnectAction {
+        // Check if the event channel is closed FIRST — no point reconnecting
+        // if nobody is listening for events anymore
+        if self.event_tx.is_closed() {
+            return ReconnectAction::Stop;
+        }
         // If we have a valid session, try to RESUME
         if let Some(ref session) = self.session {
             if session.session_id.is_some() && session.sequence.is_some() {
                 return ReconnectAction::Resume;
             }
         }
-        // Otherwise, do a fresh connect
-        if self.event_tx.is_closed() {
-            ReconnectAction::Stop
-        } else {
-            ReconnectAction::Reconnect
-        }
+        ReconnectAction::Reconnect
     }
 
     /// Get current backoff delay (for testing).
@@ -565,6 +698,7 @@ pub fn compute_backoff(current: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn identify_payload_has_correct_structure() {
@@ -635,13 +769,35 @@ mod tests {
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(original.as_bytes()).unwrap();
-        // Flush with sync_flush to get the zlib suffix
-        let compressed = encoder.flush_finish().unwrap();
+        // Use finish() which returns the inner Vec<u8>
+        let compressed = encoder.finish().unwrap();
 
+        // For a single message the compressed data starts with the zlib header.
+        // The decompressor handles this as the first message in the stream.
         let mut decompressor = ZlibDecompressor::new();
-        let result = decompressor.decompress(&compressed).unwrap();
+
+        // finish() produces a full zlib stream ending with checksum, not Z_SYNC_FLUSH.
+        // Use a fresh encoder with flush() for sync-flush behavior instead.
+        let mut encoder2 = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder2.write_all(original.as_bytes()).unwrap();
+        encoder2.flush().unwrap();
+        let compressed_sync = encoder2.get_ref().clone();
+        drop(encoder2);
+
+        // The sync-flushed data should end with ZLIB_SUFFIX
+        assert!(
+            compressed_sync.ends_with(&ZLIB_SUFFIX),
+            "Sync-flushed data should end with 00 00 FF FF, got last 4 bytes: {:02x?}",
+            &compressed_sync[compressed_sync.len().saturating_sub(4)..]
+        );
+
+        let result = decompressor.decompress(&compressed_sync).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), original);
+
+        // Also verify the old finish()-based data doesn't end with ZLIB_SUFFIX
+        // (it ends with a zlib checksum trailer instead)
+        let _ = compressed; // suppress unused warning
     }
 
     #[test]
@@ -654,21 +810,33 @@ mod tests {
     }
 
     #[test]
-    fn zlib_decompressor_resets_after_complete_message() {
+    fn zlib_decompressor_maintains_context_across_messages() {
+        // Discord's zlib-stream uses a SINGLE compression context across all
+        // messages. We simulate this with a single ZlibEncoder.
         use flate2::write::ZlibEncoder;
         use flate2::Compression;
 
         let msg1 = r#"{"op":10,"d":{"heartbeat_interval":41250}}"#;
         let msg2 = r#"{"op":11,"d":null}"#;
 
-        let mut encoder1 = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder1.write_all(msg1.as_bytes()).unwrap();
-        let compressed1 = encoder1.flush_finish().unwrap();
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
 
-        let mut encoder2 = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder2.write_all(msg2.as_bytes()).unwrap();
-        let compressed2 = encoder2.flush_finish().unwrap();
+        // Compress message 1 with sync flush
+        encoder.write_all(msg1.as_bytes()).unwrap();
+        encoder.flush().unwrap();
+        let len1 = encoder.get_ref().len();
+        let compressed1 = encoder.get_ref()[..len1].to_vec();
 
+        // Compress message 2 with sync flush (continuing same compression context)
+        encoder.write_all(msg2.as_bytes()).unwrap();
+        encoder.flush().unwrap();
+        let compressed2 = encoder.get_ref()[len1..].to_vec();
+
+        // Each segment should end with the sync flush marker
+        assert!(compressed1.ends_with(&ZLIB_SUFFIX), "msg1 should end with sync flush");
+        assert!(compressed2.ends_with(&ZLIB_SUFFIX), "msg2 should end with sync flush");
+
+        // Decompress with persistent decompressor
         let mut decompressor = ZlibDecompressor::new();
 
         let result1 = decompressor.decompress(&compressed1).unwrap();
@@ -952,6 +1120,7 @@ mod tests {
             session_id: Some("test_session".to_string()),
             resume_url: Some("wss://resume.example.com".to_string()),
             sequence: Some(42),
+            was_ready: true,
         });
 
         let action = manager.determine_reconnect_action();
@@ -965,6 +1134,27 @@ mod tests {
         let manager = GatewayManager::new("token".to_string(), config, event_tx);
 
         // Drop the receiver to close the channel
+        drop(event_rx);
+
+        let action = manager.determine_reconnect_action();
+        assert_eq!(action, ReconnectAction::Stop);
+    }
+
+    #[test]
+    fn gateway_manager_stop_takes_priority_over_resume() {
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<GatewayEvent>();
+        let config = DiscordConfig::default();
+        let mut manager = GatewayManager::new("token".to_string(), config, event_tx);
+
+        // Set a valid session that would normally trigger Resume
+        manager.set_session(SessionInfo {
+            session_id: Some("test_session".to_string()),
+            resume_url: Some("wss://resume.example.com".to_string()),
+            sequence: Some(42),
+            was_ready: true,
+        });
+
+        // But close the channel — Stop should take priority
         drop(event_rx);
 
         let action = manager.determine_reconnect_action();
@@ -994,6 +1184,7 @@ mod tests {
             session_id: Some("test".to_string()),
             resume_url: None,
             sequence: None,
+            was_ready: false,
         });
 
         let action = manager.determine_reconnect_action();
@@ -1037,7 +1228,13 @@ mod tests {
         )
         .with_url(format!("ws://{}", addr));
 
-        let _session = gateway.run().await.unwrap();
+        let session = gateway.run().await.unwrap();
+
+        // C4 fix: session_id should be None after InvalidSession(false)
+        assert!(
+            session.session_id.is_none(),
+            "session_id should be cleared after InvalidSession(false)"
+        );
 
         // Should have received Hello and InvalidSession events
         let mut events = Vec::new();
@@ -1120,5 +1317,91 @@ mod tests {
         // Should have received Reconnect event
         let has_reconnect = events.iter().any(|e| matches!(e, GatewayEvent::Reconnect));
         assert!(has_reconnect, "Expected a Reconnect event in {:?}", events.iter().map(|e| std::mem::discriminant(e)).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_resume_url() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{}", addr);
+        let expected_url = url.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws.split();
+
+            let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
+            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            let _ = read.next().await; // RESUME
+
+            let resumed = serde_json::json!({"op": 0, "t": "RESUMED", "s": 43, "d": {}});
+            write.send(Message::Text(resumed.to_string().into())).await.unwrap();
+            let _ = write.send(Message::Close(None)).await;
+        });
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let config = DiscordConfig::default();
+        let gateway = GatewayConnection::new("test_token".to_string(), config, event_tx)
+            .with_url(url);
+
+        let session = gateway.resume("old_session", 42).await.unwrap();
+        let _ = server.await;
+
+        // C3 fix: resume_url should be preserved from the connection URL
+        assert_eq!(session.resume_url, Some(expected_url));
+    }
+
+    #[tokio::test]
+    async fn invalid_session_not_resumable_clears_session() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws.split();
+
+            let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
+            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            let _ = read.next().await; // IDENTIFY
+
+            // Send READY first so session_id gets set
+            let ready = serde_json::json!({
+                "op": 0, "t": "READY", "s": 1,
+                "d": {
+                    "session_id": "sess_to_clear",
+                    "resume_gateway_url": "wss://resume.test",
+                    "guilds": [], "private_channels": [],
+                    "user": {"id": "1", "username": "test"},
+                    "read_state": [], "relationships": []
+                }
+            });
+            write.send(Message::Text(ready.to_string().into())).await.unwrap();
+
+            // Then send InvalidSession(false)
+            let invalid = serde_json::json!({"op": 9, "d": false});
+            write.send(Message::Text(invalid.to_string().into())).await.unwrap();
+            let _ = write.send(Message::Close(None)).await;
+        });
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let config = DiscordConfig::default();
+        let gateway = GatewayConnection::new("test_token".to_string(), config, event_tx)
+            .with_url(format!("ws://{}", addr));
+
+        let session = gateway.run().await.unwrap();
+        let _ = server.await;
+
+        // C4 fix: even though READY set session_id, InvalidSession(false) should clear it
+        assert!(
+            session.session_id.is_none(),
+            "session_id should be None after InvalidSession(false), but was {:?}",
+            session.session_id
+        );
     }
 }

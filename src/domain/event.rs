@@ -182,16 +182,22 @@ fn parse_dispatch_event(event_name: Option<&str>, data: &serde_json::Value) -> G
             }
         }
         Some("CHANNEL_CREATE") => {
-            let ch = parse_channel_event(data);
-            GatewayEvent::ChannelCreate(Box::new(ch))
+            match parse_channel_event(data) {
+                Some(ch) => GatewayEvent::ChannelCreate(Box::new(ch)),
+                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_CREATE".to_string()) },
+            }
         }
         Some("CHANNEL_UPDATE") => {
-            let ch = parse_channel_event(data);
-            GatewayEvent::ChannelUpdate(Box::new(ch))
+            match parse_channel_event(data) {
+                Some(ch) => GatewayEvent::ChannelUpdate(Box::new(ch)),
+                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_UPDATE".to_string()) },
+            }
         }
         Some("CHANNEL_DELETE") => {
-            let ch = parse_channel_event(data);
-            GatewayEvent::ChannelDelete(Box::new(ch))
+            match parse_channel_event(data) {
+                Some(ch) => GatewayEvent::ChannelDelete(Box::new(ch)),
+                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_DELETE".to_string()) },
+            }
         }
         Some("TYPING_START") => {
             let channel_id = data["channel_id"]
@@ -326,11 +332,11 @@ fn parse_guild_create(data: &serde_json::Value) -> GatewayEvent {
     }
 }
 
-fn parse_channel_event(data: &serde_json::Value) -> ChannelEvent {
+fn parse_channel_event(data: &serde_json::Value) -> Option<ChannelEvent> {
     let id = data["id"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+        .filter(|&v| v > 0)?;
     let guild_id = data["guild_id"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
@@ -339,14 +345,14 @@ fn parse_channel_event(data: &serde_json::Value) -> ChannelEvent {
     let kind = data["type"].as_u64().unwrap_or(0) as u8;
     let position = data["position"].as_i64().unwrap_or(0) as i32;
 
-    ChannelEvent {
-        id: Id::new(if id > 0 { id } else { 1 }),
+    Some(ChannelEvent {
+        id: Id::new(id),
         guild_id,
         name,
         kind,
         position,
         raw: data.clone(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -646,5 +652,78 @@ mod tests {
                 event_name: None
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- P9.1: parse_gateway_payload never panics on arbitrary JSON ---
+    proptest! {
+        #[test]
+        fn parse_never_panics_on_json(op in 0u64..256, has_data in proptest::bool::ANY) {
+            let data = if has_data {
+                serde_json::json!({"heartbeat_interval": 41250})
+            } else {
+                serde_json::Value::Null
+            };
+            let payload = serde_json::json!({"op": op, "d": data});
+            let _ = parse_gateway_payload(&payload);
+        }
+    }
+
+    // --- P9.1 extended: totally arbitrary JSON values ---
+    proptest! {
+        #[test]
+        fn parse_never_panics_on_arbitrary_json(
+            s in "[a-zA-Z0-9 {}:,\"\\[\\]]{0,100}"
+        ) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
+                let _ = parse_gateway_payload(&val);
+            }
+        }
+    }
+
+    // --- P9.2: known opcodes produce correct event types ---
+    proptest! {
+        #[test]
+        fn known_opcodes_produce_correct_types(heartbeat_interval in 1u64..100000) {
+            // op 10 → Hello
+            let payload = serde_json::json!({"op": 10, "d": {"heartbeat_interval": heartbeat_interval}});
+            let event = parse_gateway_payload(&payload);
+            match event {
+                GatewayEvent::Hello { heartbeat_interval: hi } => {
+                    prop_assert_eq!(hi, heartbeat_interval);
+                }
+                _ => prop_assert!(false, "Expected Hello, got {:?}", event),
+            }
+
+            // op 11 → HeartbeatAck
+            let payload = serde_json::json!({"op": 11, "d": null});
+            let event = parse_gateway_payload(&payload);
+            prop_assert!(matches!(event, GatewayEvent::HeartbeatAck));
+
+            // op 7 → Reconnect
+            let payload = serde_json::json!({"op": 7, "d": null});
+            let event = parse_gateway_payload(&payload);
+            prop_assert!(matches!(event, GatewayEvent::Reconnect));
+        }
+    }
+
+    // --- P9.2 continued: op 9 → InvalidSession ---
+    proptest! {
+        #[test]
+        fn op9_produces_invalid_session(resumable in proptest::bool::ANY) {
+            let payload = serde_json::json!({"op": 9, "d": resumable});
+            let event = parse_gateway_payload(&payload);
+            match event {
+                GatewayEvent::InvalidSession { resumable: r } => {
+                    prop_assert_eq!(r, resumable);
+                }
+                _ => prop_assert!(false, "Expected InvalidSession, got {:?}", event),
+            }
+        }
     }
 }

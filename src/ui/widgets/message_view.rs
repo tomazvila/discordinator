@@ -39,24 +39,57 @@ impl<'a> MessageView<'a> {
 
     /// Calculate which messages are visible given the scroll state and area height.
     /// Returns (start_index, end_index) into the messages VecDeque.
+    /// Accounts for date separators (+1 line when date changes) and
+    /// attachments (+1 line per attachment).
     fn visible_range(&self, visible_lines: usize) -> (usize, usize) {
         let msg_count = self.messages.len();
-        if msg_count == 0 {
+        if msg_count == 0 || visible_lines == 0 {
             return (0, 0);
         }
 
         let offset = match self.scroll {
             ScrollState::Following => 0,
-            ScrollState::Manual { offset } => *offset,
+            ScrollState::Manual { offset } => (*offset).min(msg_count.saturating_sub(1)),
         };
 
-        // We display messages from bottom (newest) up.
-        // offset=0 means we see the newest messages.
-        // Each message takes ~1 line (simplified). For proper wrapping we'd need
-        // to pre-calculate line counts, but for now 1 msg = 1 line.
-
         let end = msg_count.saturating_sub(offset);
-        let start = end.saturating_sub(visible_lines);
+
+        // Walk backwards from `end`, counting actual rendered lines per message.
+        let mut lines_used = 0;
+        let mut start = end;
+        while start > 0 {
+            let idx = start - 1;
+            let msg = &self.messages[idx];
+
+            // Each message uses 1 line for content + 1 per attachment
+            let mut msg_lines = 1 + msg.attachments.len();
+
+            // Date separator: rendered when date differs from previous message,
+            // or for the first rendered message (prev_date starts as None).
+            if idx == 0
+                || msg.timestamp.get(..10) != self.messages[idx - 1].timestamp.get(..10)
+            {
+                msg_lines += 1;
+            }
+
+            if lines_used + msg_lines > visible_lines {
+                break;
+            }
+            lines_used += msg_lines;
+            start = idx;
+        }
+
+        // The first visible message always gets a date separator in the render
+        // loop (prev_date starts as None). If our walk didn't count one because
+        // it shares a date with the message before it, we may need to drop the
+        // topmost message to fit.
+        if start > 0 && start < end {
+            let same_date = self.messages[start].timestamp.get(..10)
+                == self.messages[start - 1].timestamp.get(..10);
+            if same_date && lines_used + 1 > visible_lines && start + 1 < end {
+                start += 1;
+            }
+        }
 
         (start, end)
     }
@@ -353,7 +386,8 @@ mod tests {
 
         let (start, end) = view.visible_range(10);
         assert_eq!(end, 20); // ends at the newest
-        assert_eq!(start, 10); // shows last 10
+        // 9 messages + 1 date separator = 10 lines
+        assert_eq!(start, 11);
     }
 
     #[test]
@@ -375,7 +409,8 @@ mod tests {
 
         let (start, end) = view.visible_range(10);
         assert_eq!(end, 15); // 20 - 5 = 15
-        assert_eq!(start, 5); // 15 - 10 = 5
+        // 9 messages + 1 date separator = 10 lines
+        assert_eq!(start, 6);
     }
 
     #[test]
@@ -403,6 +438,72 @@ mod tests {
             }
         }
         assert!(sep_count >= 2, "Should have date separators for two days");
+    }
+
+    #[test]
+    fn visible_range_with_date_changes() {
+        // 4 messages across 2 dates — each date gets a separator
+        let mut messages = VecDeque::new();
+        messages.push_back(make_msg(1, 100, "a", "2024-01-15T10:00:00Z"));
+        messages.push_back(make_msg(2, 100, "b", "2024-01-15T11:00:00Z"));
+        messages.push_back(make_msg(3, 100, "c", "2024-01-16T10:00:00Z"));
+        messages.push_back(make_msg(4, 100, "d", "2024-01-16T11:00:00Z"));
+
+        let scroll = ScrollState::Following;
+        let theme = Theme::default();
+        let cache = DiscordCache::default();
+        let view = MessageView::new(&messages, &scroll, None, &theme, &cache);
+
+        // Total rendered lines: sep1 + msg1 + msg2 + sep2 + msg3 + msg4 = 6 lines
+        let (start, end) = view.visible_range(6);
+        assert_eq!(start, 0);
+        assert_eq!(end, 4);
+
+        // With only 5 lines available, the top message gets clipped
+        let (start, end) = view.visible_range(5);
+        assert_eq!(end, 4);
+        // sep2 + msg3 + msg4 = 3 lines for date2, +sep1+msg2 = 5 lines
+        // Walking: idx=3 (same date as 2) → 1 line, idx=2 (diff date from 1) → 2 lines,
+        // idx=1 (same date as 0) → 1 line. Total=4. idx=0 (first) → 2 lines, total=6>5, break.
+        // start=1, then check: msg[1] same date as msg[0]? yes. 4+1=5<=5, no bump.
+        assert_eq!(start, 1);
+    }
+
+    #[test]
+    fn visible_range_with_attachments() {
+        let mut messages = VecDeque::new();
+        let mut msg_with_att = make_msg(1, 100, "file", "2024-01-15T10:00:00Z");
+        msg_with_att.attachments.push(MessageAttachment {
+            filename: "a.png".to_string(),
+            size: 100,
+            url: "https://example.com/a.png".to_string(),
+            content_type: None,
+        });
+        msg_with_att.attachments.push(MessageAttachment {
+            filename: "b.png".to_string(),
+            size: 200,
+            url: "https://example.com/b.png".to_string(),
+            content_type: None,
+        });
+        messages.push_back(msg_with_att);
+        messages.push_back(make_msg(2, 100, "text", "2024-01-15T11:00:00Z"));
+
+        let scroll = ScrollState::Following;
+        let theme = Theme::default();
+        let cache = DiscordCache::default();
+        let view = MessageView::new(&messages, &scroll, None, &theme, &cache);
+
+        // msg1: date sep(1) + content(1) + 2 attachments(2) = 4 lines
+        // msg2: same date → content(1) = 1 line
+        // Total = 5 lines
+        let (start, end) = view.visible_range(5);
+        assert_eq!(start, 0);
+        assert_eq!(end, 2);
+
+        // With only 2 lines: can fit msg2(1 line) + date sep for first rendered(1) = 2
+        let (start, end) = view.visible_range(2);
+        assert_eq!(start, 1);
+        assert_eq!(end, 2);
     }
 
     #[test]

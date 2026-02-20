@@ -1,14 +1,9 @@
-use std::time::Duration;
-
-use color_eyre::eyre::{eyre, Result};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
-
-use crate::config::DiscordConfig;
 
 /// Login method selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,84 +427,12 @@ impl LoginScreen<'_> {
     }
 }
 
-/// Validate a token by attempting a gateway connection.
-/// Connects to the gateway, sends IDENTIFY, and checks for READY vs error.
-/// Returns Ok(true) for valid token, Ok(false) for invalid, Err for connection failure.
-pub async fn validate_token_via_gateway(
-    token: &str,
-    gateway_url: &str,
-    config: &DiscordConfig,
-) -> Result<bool> {
-    use crate::domain::event::{self, GatewayEvent};
-    use crate::infrastructure::gateway::build_identify_payload;
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    let (ws_stream, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async(gateway_url),
-    )
-    .await
-    .map_err(|_| eyre!("Gateway connection timed out"))?
-    .map_err(|e| eyre!("Gateway connection failed: {}", e))?;
-
-    let (mut write, mut read) = ws_stream.split();
-
-    // Wait for HELLO
-    let hello_msg = tokio::time::timeout(Duration::from_secs(5), read.next())
-        .await
-        .map_err(|_| eyre!("Timeout waiting for HELLO"))?
-        .ok_or_else(|| eyre!("Connection closed before HELLO"))?
-        .map_err(|e| eyre!("WebSocket error: {}", e))?;
-
-    let hello_text = hello_msg
-        .into_text()
-        .map_err(|e| eyre!("HELLO not text: {}", e))?;
-    let hello_payload: serde_json::Value =
-        serde_json::from_str(&hello_text).map_err(|e| eyre!("HELLO parse error: {}", e))?;
-    let hello_event = event::parse_gateway_payload(&hello_payload);
-
-    if !matches!(hello_event, GatewayEvent::Hello { .. }) {
-        return Err(eyre!("Expected HELLO, got {:?}", hello_event));
-    }
-
-    // Send IDENTIFY
-    let identify = build_identify_payload(token, config);
-    let identify_text = serde_json::to_string(&identify)?;
-    write
-        .send(Message::Text(identify_text.into()))
-        .await
-        .map_err(|e| eyre!("Failed to send IDENTIFY: {}", e))?;
-
-    // Wait for READY or error
-    let response = tokio::time::timeout(Duration::from_secs(10), read.next())
-        .await
-        .map_err(|_| eyre!("Timeout waiting for READY"))?
-        .ok_or_else(|| eyre!("Connection closed after IDENTIFY"))?
-        .map_err(|e| eyre!("WebSocket error after IDENTIFY: {}", e))?;
-
-    let response_text = response
-        .into_text()
-        .map_err(|e| eyre!("Response not text: {}", e))?;
-    let response_payload: serde_json::Value =
-        serde_json::from_str(&response_text).map_err(|e| eyre!("Response parse error: {}", e))?;
-    let response_event = event::parse_gateway_payload(&response_payload);
-
-    // Close the connection
-    let _ = write
-        .send(Message::Close(None))
-        .await;
-
-    match response_event {
-        GatewayEvent::Ready(_) => Ok(true),
-        GatewayEvent::InvalidSession { .. } => Ok(false),
-        _ => Ok(false),
-    }
-}
+// validate_token_via_gateway lives in crate::auth (not here — presentation must not import infrastructure)
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DiscordConfig;
     use ratatui::{backend::TestBackend, Terminal};
 
     // === Task 38: LoginState tests ===
@@ -960,7 +883,7 @@ mod tests {
 
         let config = DiscordConfig::default();
         let url = format!("ws://{}", addr);
-        let result = validate_token_via_gateway("valid_token", &url, &config).await;
+        let result = crate::auth::validate_token_via_gateway("valid_token", &url, &config).await;
 
         let _ = server.await;
         assert!(result.is_ok());
@@ -1003,7 +926,7 @@ mod tests {
 
         let config = DiscordConfig::default();
         let url = format!("ws://{}", addr);
-        let result = validate_token_via_gateway("invalid_token", &url, &config).await;
+        let result = crate::auth::validate_token_via_gateway("invalid_token", &url, &config).await;
 
         let _ = server.await;
         assert!(result.is_ok());
@@ -1015,7 +938,7 @@ mod tests {
         let config = DiscordConfig::default();
         // Connect to a port that's not listening
         let result =
-            validate_token_via_gateway("token", "ws://127.0.0.1:1", &config).await;
+            crate::auth::validate_token_via_gateway("token", "ws://127.0.0.1:1", &config).await;
         assert!(result.is_err(), "Should fail when gateway is unreachable");
     }
 
@@ -1068,7 +991,7 @@ mod tests {
 
         let config = DiscordConfig::default();
         let url = format!("ws://{}", addr);
-        let _ = validate_token_via_gateway("my_token", &url, &config).await;
+        let _ = crate::auth::validate_token_via_gateway("my_token", &url, &config).await;
 
         let identify = identify_rx.recv().await.unwrap();
         let _ = server.await;

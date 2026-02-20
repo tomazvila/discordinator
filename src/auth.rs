@@ -87,6 +87,30 @@ pub enum LoginResponse {
     MfaRequired { ticket: String },
 }
 
+/// Build a reqwest Client with anti-detection headers for unauthenticated requests.
+fn build_auth_client(config: &DiscordConfig) -> Result<reqwest::Client> {
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    let super_props = anti_detection::build_super_properties(config);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "User-Agent",
+        HeaderValue::from_str(&config.browser_user_agent)
+            .map_err(|e| eyre!("Invalid User-Agent: {}", e))?,
+    );
+    headers.insert(
+        "X-Super-Properties",
+        HeaderValue::from_str(&super_props)
+            .map_err(|e| eyre!("Invalid X-Super-Properties: {}", e))?,
+    );
+    headers.insert("X-Discord-Locale", HeaderValue::from_static("en-US"));
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .map_err(|e| eyre!("Failed to build HTTP client: {}", e))
+}
+
 /// Login with email + password via Discord's auth endpoint.
 /// Uses anti-detection headers. `api_base` is parameterized for testing.
 pub async fn login_with_credentials(
@@ -95,8 +119,7 @@ pub async fn login_with_credentials(
     config: &DiscordConfig,
     api_base: &str,
 ) -> Result<LoginResponse> {
-    let client = reqwest::Client::new();
-    let super_props = anti_detection::build_super_properties(config);
+    let client = build_auth_client(config)?;
 
     let body = serde_json::json!({
         "login": email,
@@ -108,10 +131,6 @@ pub async fn login_with_credentials(
 
     let response = client
         .post(format!("{}/auth/login", api_base))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", &config.browser_user_agent)
-        .header("X-Super-Properties", &super_props)
-        .header("X-Discord-Locale", "en-US")
         .json(&body)
         .send()
         .await
@@ -155,8 +174,7 @@ pub async fn submit_mfa_totp(
     config: &DiscordConfig,
     api_base: &str,
 ) -> Result<String> {
-    let client = reqwest::Client::new();
-    let super_props = anti_detection::build_super_properties(config);
+    let client = build_auth_client(config)?;
 
     let body = serde_json::json!({
         "code": code,
@@ -167,10 +185,6 @@ pub async fn submit_mfa_totp(
 
     let response = client
         .post(format!("{}/auth/mfa/totp", api_base))
-        .header("Content-Type", "application/json")
-        .header("User-Agent", &config.browser_user_agent)
-        .header("X-Super-Properties", &super_props)
-        .header("X-Discord-Locale", "en-US")
         .json(&body)
         .send()
         .await
@@ -193,6 +207,82 @@ pub async fn submit_mfa_totp(
         .as_str()
         .map(String::from)
         .ok_or_else(|| eyre!("No token in MFA response"))
+}
+
+// === Task 38: Token Validation via Gateway ===
+
+/// Validate a token by attempting a gateway connection.
+/// Connects to the gateway, sends IDENTIFY, and checks for READY vs error.
+/// Returns Ok(true) for valid token, Ok(false) for invalid, Err for connection failure.
+pub async fn validate_token_via_gateway(
+    token: &str,
+    gateway_url: &str,
+    config: &DiscordConfig,
+) -> Result<bool> {
+    use crate::domain::event::{self, GatewayEvent};
+    use crate::infrastructure::gateway::build_identify_payload;
+    use futures_util::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (ws_stream, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(gateway_url),
+    )
+    .await
+    .map_err(|_| eyre!("Gateway connection timed out"))?
+    .map_err(|e| eyre!("Gateway connection failed: {}", e))?;
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Wait for HELLO
+    let hello_msg = tokio::time::timeout(Duration::from_secs(5), read.next())
+        .await
+        .map_err(|_| eyre!("Timeout waiting for HELLO"))?
+        .ok_or_else(|| eyre!("Connection closed before HELLO"))?
+        .map_err(|e| eyre!("WebSocket error: {}", e))?;
+
+    let hello_text = hello_msg
+        .into_text()
+        .map_err(|e| eyre!("HELLO not text: {}", e))?;
+    let hello_payload: serde_json::Value =
+        serde_json::from_str(&hello_text).map_err(|e| eyre!("HELLO parse error: {}", e))?;
+    let hello_event = event::parse_gateway_payload(&hello_payload);
+
+    if !matches!(hello_event, GatewayEvent::Hello { .. }) {
+        return Err(eyre!("Expected HELLO, got {:?}", hello_event));
+    }
+
+    // Send IDENTIFY
+    let identify = build_identify_payload(token, config);
+    let identify_text = serde_json::to_string(&identify)?;
+    write
+        .send(Message::Text(identify_text.into()))
+        .await
+        .map_err(|e| eyre!("Failed to send IDENTIFY: {}", e))?;
+
+    // Wait for READY or error
+    let response = tokio::time::timeout(Duration::from_secs(10), read.next())
+        .await
+        .map_err(|_| eyre!("Timeout waiting for READY"))?
+        .ok_or_else(|| eyre!("Connection closed after IDENTIFY"))?
+        .map_err(|e| eyre!("WebSocket error after IDENTIFY: {}", e))?;
+
+    let response_text = response
+        .into_text()
+        .map_err(|e| eyre!("Response not text: {}", e))?;
+    let response_payload: serde_json::Value =
+        serde_json::from_str(&response_text).map_err(|e| eyre!("Response parse error: {}", e))?;
+    let response_event = event::parse_gateway_payload(&response_payload);
+
+    // Close the connection
+    let _ = write.send(Message::Close(None)).await;
+
+    match response_event {
+        GatewayEvent::Ready(_) => Ok(true),
+        GatewayEvent::InvalidSession { .. } => Ok(false),
+        _ => Ok(false),
+    }
 }
 
 // === Task 40: QR Code Authentication ===
@@ -276,15 +366,17 @@ impl QrAuthSession {
     }
 
     /// Generate QR code lines for terminal rendering.
-    pub fn generate_qr_lines(&self) -> Vec<String> {
+    /// Returns an error if QR code generation fails (e.g., URL too long).
+    pub fn generate_qr_lines(&self) -> Result<Vec<String>> {
         let url = self.qr_url();
-        let code = qrcode::QrCode::new(url.as_bytes()).expect("Failed to create QR code");
+        let code = qrcode::QrCode::new(url.as_bytes())
+            .map_err(|e| color_eyre::eyre::eyre!("QR code generation failed: {}", e))?;
         let image = code
             .render::<char>()
             .quiet_zone(true)
             .module_dimensions(2, 1)
             .build();
-        image.lines().map(|l| l.to_string()).collect()
+        Ok(image.lines().map(|l| l.to_string()).collect())
     }
 }
 
@@ -839,7 +931,7 @@ mod tests {
     #[test]
     fn qr_auth_generates_qr_lines() {
         let session = QrAuthSession::new().unwrap();
-        let lines = session.generate_qr_lines();
+        let lines = session.generate_qr_lines().unwrap();
 
         // QR code should produce multiple lines
         assert!(!lines.is_empty(), "QR code should produce lines");

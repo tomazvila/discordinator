@@ -122,6 +122,14 @@ impl DiscordCache {
     /// Add a guild to the cache and update guild_order.
     pub fn insert_guild(&mut self, guild: CachedGuild) {
         let id = guild.id;
+        // Remove stale channel_guild entries from old guild data
+        if let Some(old_guild) = self.guilds.get(&id) {
+            for &old_ch_id in &old_guild.channel_order {
+                if !guild.channel_order.contains(&old_ch_id) {
+                    self.channel_guild.remove(&old_ch_id);
+                }
+            }
+        }
         // Update channel_guild reverse lookup for all channels
         for &ch_id in &guild.channel_order {
             self.channel_guild.insert(ch_id, id);
@@ -667,5 +675,184 @@ mod tests {
         assert!(cache.guild_order.is_empty());
         assert!(cache.messages.is_empty());
         assert!(cache.dm_channels.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- P2.1: messages never exceed MAX_CACHED_MESSAGES_PER_CHANNEL ---
+    proptest! {
+        #[test]
+        fn insert_message_never_exceeds_capacity(count in 1usize..500) {
+            let mut cache = DiscordCache::default();
+            let channel_id = Id::new(10);
+            for i in 1..=count {
+                cache.insert_message(CachedMessage {
+                    id: Id::new(i as u64),
+                    channel_id,
+                    author_id: Id::new(1),
+                    content: format!("msg {}", i),
+                    timestamp: "2024-01-01T00:00:00Z".to_string(),
+                    edited_timestamp: None,
+                    attachments: vec![],
+                    embeds: vec![],
+                    message_reference: None,
+                    mention_everyone: false,
+                    mentions: vec![],
+                    rendered: None,
+                });
+            }
+            let len = cache.messages.get(&channel_id).map(|d| d.len()).unwrap_or(0);
+            prop_assert!(len <= MAX_CACHED_MESSAGES_PER_CHANNEL,
+                "Messages {} > max {}", len, MAX_CACHED_MESSAGES_PER_CHANNEL);
+        }
+    }
+
+    // --- P2.2: insert_guild idempotent for guild_order ---
+    proptest! {
+        #[test]
+        fn insert_guild_no_duplicate_order(n_inserts in 1usize..10) {
+            let mut cache = DiscordCache::default();
+            let guild = CachedGuild {
+                id: Id::new(42),
+                name: "Test".to_string(),
+                icon: None,
+                channel_order: vec![],
+                roles: std::collections::HashMap::new(),
+            };
+            for _ in 0..n_inserts {
+                cache.insert_guild(guild.clone());
+            }
+            let count = cache.guild_order.iter().filter(|&&id| id == Id::new(42)).count();
+            prop_assert_eq!(count, 1, "Guild appeared {} times in guild_order", count);
+        }
+    }
+
+    // --- P2.3: channel_guild reverse lookup consistent after insert_guild ---
+    proptest! {
+        #[test]
+        fn channel_guild_consistent_after_insert(
+            ch_ids in proptest::collection::vec(1u64..1000, 1..10)
+        ) {
+            let mut cache = DiscordCache::default();
+            let guild_id = Id::new(1);
+            let channel_order: Vec<Id<ChannelMarker>> = ch_ids.iter().map(|&id| Id::new(id)).collect();
+            let guild = CachedGuild {
+                id: guild_id,
+                name: "G".to_string(),
+                icon: None,
+                channel_order: channel_order.clone(),
+                roles: std::collections::HashMap::new(),
+            };
+            cache.insert_guild(guild);
+            for ch_id in &channel_order {
+                prop_assert_eq!(
+                    cache.channel_guild.get(ch_id),
+                    Some(&guild_id),
+                    "channel_guild missing entry for channel {:?}", ch_id
+                );
+            }
+        }
+    }
+
+    // --- P2.4: remove_guild clears all channel_guild entries ---
+    proptest! {
+        #[test]
+        fn remove_guild_clears_channel_guild(
+            ch_ids in proptest::collection::vec(1u64..1000, 1..10)
+        ) {
+            let mut cache = DiscordCache::default();
+            let guild_id = Id::new(1);
+            let channel_order: Vec<Id<ChannelMarker>> = ch_ids.iter().map(|&id| Id::new(id)).collect();
+            let guild = CachedGuild {
+                id: guild_id,
+                name: "G".to_string(),
+                icon: None,
+                channel_order: channel_order.clone(),
+                roles: std::collections::HashMap::new(),
+            };
+            cache.insert_guild(guild);
+            // Also insert the channels themselves
+            for &ch_id in &channel_order {
+                cache.channels.insert(ch_id, CachedChannel {
+                    id: ch_id,
+                    guild_id: Some(guild_id),
+                    name: "ch".to_string(),
+                    kind: twilight_model::channel::ChannelType::GuildText,
+                    position: 0,
+                    parent_id: None,
+                    topic: None,
+                });
+            }
+            cache.remove_guild(guild_id);
+            for ch_id in &channel_order {
+                prop_assert!(
+                    !cache.channel_guild.contains_key(ch_id),
+                    "channel_guild still has entry for {:?} after guild removal", ch_id
+                );
+                prop_assert!(
+                    !cache.channels.contains_key(ch_id),
+                    "channels still has entry for {:?} after guild removal", ch_id
+                );
+            }
+            prop_assert!(!cache.guilds.contains_key(&guild_id));
+        }
+    }
+
+    // --- P2.5: remove_channel clears associated data ---
+    proptest! {
+        #[test]
+        fn remove_channel_clears_data(n_messages in 0usize..50) {
+            let mut cache = DiscordCache::default();
+            let guild_id = Id::new(1);
+            let ch_id = Id::new(10);
+            cache.insert_guild(CachedGuild {
+                id: guild_id,
+                name: "G".to_string(),
+                icon: None,
+                channel_order: vec![ch_id],
+                roles: std::collections::HashMap::new(),
+            });
+            cache.insert_channel(CachedChannel {
+                id: ch_id,
+                guild_id: Some(guild_id),
+                name: "ch".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            });
+            for i in 1..=n_messages {
+                cache.insert_message(CachedMessage {
+                    id: Id::new(i as u64),
+                    channel_id: ch_id,
+                    author_id: Id::new(1),
+                    content: "msg".to_string(),
+                    timestamp: "2024-01-01T00:00:00Z".to_string(),
+                    edited_timestamp: None,
+                    attachments: vec![],
+                    embeds: vec![],
+                    message_reference: None,
+                    mention_everyone: false,
+                    mentions: vec![],
+                    rendered: None,
+                });
+            }
+            cache.typing.insert(ch_id, vec![]);
+            cache.read_states.insert(ch_id, ReadState {
+                last_message_id: Id::new(1),
+                mention_count: 0,
+            });
+
+            cache.remove_channel(ch_id);
+            prop_assert!(!cache.channels.contains_key(&ch_id));
+            prop_assert!(!cache.messages.contains_key(&ch_id));
+            prop_assert!(!cache.typing.contains_key(&ch_id));
+            prop_assert!(!cache.read_states.contains_key(&ch_id));
+            prop_assert!(!cache.channel_guild.contains_key(&ch_id));
+        }
     }
 }

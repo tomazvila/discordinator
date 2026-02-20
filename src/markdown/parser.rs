@@ -78,39 +78,43 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
         // Bold + italic (***text***)
         if i + 2 < len && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*' {
             if let Some((content, end)) = find_closing(&chars, i + 3, "***") {
-                if !current_text.is_empty() {
-                    spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                if !content.is_empty() {
+                    if !current_text.is_empty() {
+                        spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                    }
+                    let inner = parse_inline(&content, MarkdownStyle::default());
+                    spans.push(MarkdownSpan::Styled {
+                        content: inner,
+                        style: MarkdownStyle {
+                            bold: true,
+                            italic: true,
+                            ..Default::default()
+                        },
+                    });
+                    i = end;
+                    continue;
                 }
-                let inner = parse_inline(&content, MarkdownStyle::default());
-                spans.push(MarkdownSpan::Styled {
-                    content: inner,
-                    style: MarkdownStyle {
-                        bold: true,
-                        italic: true,
-                        ..Default::default()
-                    },
-                });
-                i = end;
-                continue;
             }
         }
 
         // Bold (**text**)
         if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
             if let Some((content, end)) = find_closing(&chars, i + 2, "**") {
-                if !current_text.is_empty() {
-                    spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                if !content.is_empty() {
+                    if !current_text.is_empty() {
+                        spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                    }
+                    let inner = parse_inline(&content, MarkdownStyle::default());
+                    spans.push(MarkdownSpan::Styled {
+                        content: inner,
+                        style: MarkdownStyle {
+                            bold: true,
+                            ..Default::default()
+                        },
+                    });
+                    i = end;
+                    continue;
                 }
-                let inner = parse_inline(&content, MarkdownStyle::default());
-                spans.push(MarkdownSpan::Styled {
-                    content: inner,
-                    style: MarkdownStyle {
-                        bold: true,
-                        ..Default::default()
-                    },
-                });
-                i = end;
-                continue;
             }
         }
 
@@ -138,38 +142,84 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
         // Underline (__text__)
         if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
             if let Some((content, end)) = find_closing(&chars, i + 2, "__") {
-                if !current_text.is_empty() {
-                    spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                if !content.is_empty() {
+                    if !current_text.is_empty() {
+                        spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                    }
+                    let inner = parse_inline(&content, MarkdownStyle::default());
+                    spans.push(MarkdownSpan::Styled {
+                        content: inner,
+                        style: MarkdownStyle {
+                            underline: true,
+                            ..Default::default()
+                        },
+                    });
+                    i = end;
+                    continue;
                 }
-                let inner = parse_inline(&content, MarkdownStyle::default());
-                spans.push(MarkdownSpan::Styled {
-                    content: inner,
-                    style: MarkdownStyle {
-                        underline: true,
-                        ..Default::default()
-                    },
-                });
-                i = end;
-                continue;
+            }
+        }
+
+        // Italic (_text_) — single underscore, but not __ (underline).
+        // Skip if preceded by a word char (mid-word underscores like some_var_name are literal).
+        if chars[i] == '_' && !(i + 1 < len && chars[i + 1] == '_') {
+            let preceded_by_word = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+            if !preceded_by_word {
+                if let Some((content, end)) = find_closing(&chars, i + 1, "_") {
+                    // Also check closing underscore is not followed by a word char
+                    let followed_by_word = end < len && (chars[end].is_alphanumeric() || chars[end] == '_');
+                    if !content.is_empty() && !followed_by_word {
+                        if !current_text.is_empty() {
+                            spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                        }
+                        let inner = parse_inline(&content, MarkdownStyle::default());
+                        spans.push(MarkdownSpan::Styled {
+                            content: inner,
+                            style: MarkdownStyle {
+                                italic: true,
+                                ..Default::default()
+                            },
+                        });
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Spoiler (||text||)
+        if i + 1 < len && chars[i] == '|' && chars[i + 1] == '|' {
+            if let Some((content, end)) = find_closing(&chars, i + 2, "||") {
+                if !content.is_empty() {
+                    if !current_text.is_empty() {
+                        spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                    }
+                    let inner = parse_inline(&content, MarkdownStyle::default());
+                    spans.push(MarkdownSpan::Spoiler(inner));
+                    i = end;
+                    continue;
+                }
             }
         }
 
         // Strikethrough (~~text~~)
         if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
             if let Some((content, end)) = find_closing(&chars, i + 2, "~~") {
-                if !current_text.is_empty() {
-                    spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                if !content.is_empty() {
+                    if !current_text.is_empty() {
+                        spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
+                    }
+                    let inner = parse_inline(&content, MarkdownStyle::default());
+                    spans.push(MarkdownSpan::Styled {
+                        content: inner,
+                        style: MarkdownStyle {
+                            strikethrough: true,
+                            ..Default::default()
+                        },
+                    });
+                    i = end;
+                    continue;
                 }
-                let inner = parse_inline(&content, MarkdownStyle::default());
-                spans.push(MarkdownSpan::Styled {
-                    content: inner,
-                    style: MarkdownStyle {
-                        strikethrough: true,
-                        ..Default::default()
-                    },
-                });
-                i = end;
-                continue;
             }
         }
 
@@ -193,6 +243,19 @@ fn find_closing(chars: &[char], start: usize, delimiter: &str) -> Option<(String
 
     let mut i = start;
     while i + delim_len <= chars.len() {
+        // Skip backtick-enclosed regions — formatting doesn't apply inside code spans
+        if chars[i] == '`' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '`' {
+                j += 1;
+            }
+            if j < chars.len() {
+                i = j + 1; // skip past closing backtick
+                continue;
+            }
+            // Unclosed backtick, continue normally
+        }
+
         // Check if delimiter matches at position i
         let mut matches = true;
         for (j, dc) in delim_chars.iter().enumerate() {
@@ -204,17 +267,41 @@ fn find_closing(chars: &[char], start: usize, delimiter: &str) -> Option<(String
         if matches {
             // For single `*` delimiter, make sure we're not at `**` (which is bold, not italic close)
             if delimiter == "*" && i + 1 < chars.len() && chars[i + 1] == '*' {
-                // This is ** not *, skip past this sequence
-                i += 2;
-                // Skip past the bold content and closing **
-                while i < chars.len() {
-                    if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
-                        i += 2;
+                // This is ** not *, try to skip past the bold content and closing **
+                let mut j = i + 2;
+                let mut found_close = false;
+                while j < chars.len() {
+                    if j + 1 < chars.len() && chars[j] == '*' && chars[j + 1] == '*' {
+                        j += 2;
+                        found_close = true;
                         break;
                     }
-                    i += 1;
+                    j += 1;
                 }
-                continue;
+                if found_close {
+                    i = j;
+                    continue;
+                }
+                // Unclosed **: treat this * as a valid closer
+            }
+            // For single `_` delimiter, make sure we're not at `__` (which is underline, not italic close)
+            if delimiter == "_" && i + 1 < chars.len() && chars[i + 1] == '_' {
+                // This is __ not _, try to skip past the underline content and closing __
+                let mut j = i + 2;
+                let mut found_close = false;
+                while j < chars.len() {
+                    if j + 1 < chars.len() && chars[j] == '_' && chars[j + 1] == '_' {
+                        j += 2;
+                        found_close = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found_close {
+                    i = j;
+                    continue;
+                }
+                // Unclosed __: treat this _ as a valid closer
             }
             let content: String = chars[start..i].iter().collect();
             return Some((content, i + delim_len));
@@ -766,5 +853,92 @@ mod tests {
         assert!(matches!(&ast.spans[2], MarkdownSpan::ChannelMention(id) if id.get() == 100));
         assert!(matches!(&ast.spans[4], MarkdownSpan::CustomEmoji { name, .. } if name == "emoji"));
         assert!(matches!(&ast.spans[6], MarkdownSpan::UserMention(id) if id.get() == 300));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Extract all text content from a MarkdownAst (recursively).
+    fn extract_text(spans: &[MarkdownSpan]) -> String {
+        let mut result = String::new();
+        for span in spans {
+            match span {
+                MarkdownSpan::Text(t) => result.push_str(t),
+                MarkdownSpan::Styled { content, .. } => result.push_str(&extract_text(content)),
+                MarkdownSpan::InlineCode(c) => result.push_str(c),
+                MarkdownSpan::CodeBlock { content, language } => {
+                    if let Some(lang) = language {
+                        result.push_str(lang);
+                    }
+                    result.push_str(content);
+                }
+                MarkdownSpan::Spoiler(inner) => result.push_str(&extract_text(inner)),
+                MarkdownSpan::UserMention(_)
+                | MarkdownSpan::ChannelMention(_)
+                | MarkdownSpan::RoleMention(_)
+                | MarkdownSpan::CustomEmoji { .. } => {}
+            }
+        }
+        result
+    }
+
+    // --- P3.1: parse never panics on arbitrary input ---
+    proptest! {
+        #[test]
+        fn parse_never_panics(input in ".*") {
+            let _ = parse(&input);
+        }
+    }
+
+    // --- P3.2: plain ASCII without formatting chars → single Text span ---
+    proptest! {
+        #[test]
+        fn plain_ascii_is_single_text(input in "[a-zA-Z0-9 ,.!?;:]+") {
+            let ast = parse(&input);
+            prop_assert_eq!(ast.spans.len(), 1, "Expected 1 span, got {:?}", ast.spans);
+            match &ast.spans[0] {
+                MarkdownSpan::Text(t) => prop_assert_eq!(t, &input),
+                other => prop_assert!(false, "Expected Text, got {:?}", other),
+            }
+        }
+    }
+
+    // --- P3.3: text content is preserved for plain text ---
+    proptest! {
+        #[test]
+        fn text_content_preserved(input in "[a-zA-Z0-9 ]+") {
+            let ast = parse(&input);
+            let extracted = extract_text(&ast.spans);
+            prop_assert_eq!(extracted, input);
+        }
+    }
+
+    // --- P3.4: empty input produces empty spans ---
+    proptest! {
+        #[test]
+        fn empty_input_empty_spans(_x in Just(())) {
+            let ast = parse("");
+            prop_assert!(ast.spans.is_empty());
+        }
+    }
+
+    // --- P3 bonus: parse never produces empty Text spans ---
+    proptest! {
+        #[test]
+        fn no_empty_text_spans(input in ".{0,100}") {
+            let ast = parse(&input);
+            fn check_no_empty(spans: &[MarkdownSpan]) -> bool {
+                spans.iter().all(|s| match s {
+                    MarkdownSpan::Text(t) => !t.is_empty(),
+                    MarkdownSpan::Styled { content, .. } => check_no_empty(content),
+                    MarkdownSpan::Spoiler(inner) => check_no_empty(inner),
+                    _ => true,
+                })
+            }
+            prop_assert!(check_no_empty(&ast.spans), "Found empty Text span in {:?}", ast.spans);
+        }
     }
 }

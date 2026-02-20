@@ -6,6 +6,10 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 Discordinator is a Discord TUI client written in Rust with tmux-like split pane support. It uses the Discord User API (selfbot approach) with anti-detection measures.
 
+## Code Map (Required Reading)
+
+**Before making any changes, read `CODEMAPS.md`** for the complete file index, architecture diagram, type locations, data flow, and module dependency graph. This is the authoritative source for understanding where code lives and how layers connect. Keep `CODEMAPS.md` up to date when adding, removing, or significantly changing files.
+
 ## Feature Implementation
 
 **Before implementing any new feature, read `REQUIREMENTS.md` for specifications:**

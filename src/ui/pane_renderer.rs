@@ -107,7 +107,7 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
     let msg_view = MessageView::new(
         messages,
         &pane.scroll,
-        None, // selected_message — not available on domain::pane::Pane
+        pane.selected_message,
         &state.theme,
         &state.cache,
     );

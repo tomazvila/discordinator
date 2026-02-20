@@ -47,6 +47,9 @@ pub enum MarkdownSpan {
         id: u64,
         animated: bool,
     },
+
+    /// Spoiler (||text||).
+    Spoiler(Vec<MarkdownSpan>),
 }
 
 /// Style flags for formatted text.

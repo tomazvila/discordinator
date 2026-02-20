@@ -140,6 +140,12 @@ fn render_span(
                 .unwrap()
                 .push(Span::styled(format!(":{name}:"), style));
         }
+        MarkdownSpan::Spoiler(inner) => {
+            let spoiler_style = base_style.fg(Color::DarkGray).bg(Color::DarkGray);
+            for child in inner {
+                render_span(child, spoiler_style, resolver, lines);
+            }
+        }
     }
 }
 
