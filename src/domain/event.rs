@@ -625,6 +625,144 @@ mod tests {
     }
 
     #[test]
+    fn parse_channel_update_event() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "CHANNEL_UPDATE",
+            "s": 5,
+            "d": {
+                "id": "10",
+                "guild_id": "555",
+                "name": "updated-channel",
+                "type": 0,
+                "position": 3
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        match event {
+            GatewayEvent::ChannelUpdate(ch) => {
+                assert_eq!(ch.id.get(), 10);
+                assert_eq!(ch.guild_id.unwrap().get(), 555);
+                assert_eq!(ch.name, "updated-channel");
+                assert_eq!(ch.position, 3);
+            }
+            _ => panic!("Expected ChannelUpdate event, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn parse_channel_delete_event() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "CHANNEL_DELETE",
+            "s": 6,
+            "d": {
+                "id": "10",
+                "guild_id": "555",
+                "name": "deleted-channel",
+                "type": 0,
+                "position": 0
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        match event {
+            GatewayEvent::ChannelDelete(ch) => {
+                assert_eq!(ch.id.get(), 10);
+                assert_eq!(ch.guild_id.unwrap().get(), 555);
+                assert_eq!(ch.name, "deleted-channel");
+            }
+            _ => panic!("Expected ChannelDelete event, got {:?}", event),
+        }
+    }
+
+    #[test]
+    fn parse_typing_start_rejects_zero_channel_id() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "TYPING_START",
+            "s": 20,
+            "d": {
+                "channel_id": "0",
+                "user_id": "100",
+                "timestamp": 1704067200
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        assert!(
+            matches!(event, GatewayEvent::Unknown { .. }),
+            "TYPING_START with channel_id=0 should be Unknown"
+        );
+    }
+
+    #[test]
+    fn parse_typing_start_rejects_zero_user_id() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "TYPING_START",
+            "s": 20,
+            "d": {
+                "channel_id": "789",
+                "user_id": "0",
+                "timestamp": 1704067200
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        assert!(
+            matches!(event, GatewayEvent::Unknown { .. }),
+            "TYPING_START with user_id=0 should be Unknown"
+        );
+    }
+
+    #[test]
+    fn parse_message_create_filters_zero_mention_ids() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "MESSAGE_CREATE",
+            "s": 10,
+            "d": {
+                "id": "123456",
+                "channel_id": "789",
+                "author": {"id": "100", "username": "testuser"},
+                "content": "Hello",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "mention_everyone": false,
+                "mentions": [{"id": "200"}, {"id": "0"}, {"id": "300"}]
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        match event {
+            GatewayEvent::MessageCreate(msg) => {
+                // "0" should be filtered out by the `v > 0` check
+                assert_eq!(msg.mentions.len(), 2);
+                assert_eq!(msg.mentions[0].get(), 200);
+                assert_eq!(msg.mentions[1].get(), 300);
+            }
+            _ => panic!("Expected MessageCreate event"),
+        }
+    }
+
+    #[test]
+    fn parse_channel_event_rejects_zero_id() {
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "CHANNEL_CREATE",
+            "s": 4,
+            "d": {
+                "id": "0",
+                "guild_id": "555",
+                "name": "bad-channel",
+                "type": 0,
+                "position": 0
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        assert!(
+            matches!(event, GatewayEvent::Unknown { .. }),
+            "CHANNEL_CREATE with id=0 should be Unknown"
+        );
+    }
+
+    #[test]
     fn parse_unknown_event() {
         let payload = serde_json::json!({
             "op": 0,

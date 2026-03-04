@@ -661,6 +661,38 @@ mod tests {
         assert_eq!(rs.last_message_id.get(), 999);
     }
 
+    // --- insert_guild stale channel cleanup ---
+
+    #[test]
+    fn insert_guild_removes_stale_channel_guild_entries() {
+        let mut cache = DiscordCache::default();
+        // Insert guild with channels [10, 20, 30]
+        cache.insert_guild(make_guild(1, "Guild", vec![10, 20, 30]));
+        assert_eq!(cache.channel_guild.get(&Id::new(10)), Some(&Id::new(1)));
+        assert_eq!(cache.channel_guild.get(&Id::new(20)), Some(&Id::new(1)));
+        assert_eq!(cache.channel_guild.get(&Id::new(30)), Some(&Id::new(1)));
+
+        // Re-insert guild with only channels [10, 30] — channel 20 was removed
+        cache.insert_guild(make_guild(1, "Guild Updated", vec![10, 30]));
+        assert_eq!(cache.channel_guild.get(&Id::new(10)), Some(&Id::new(1)));
+        // Channel 20 should be removed from reverse lookup
+        assert!(
+            cache.channel_guild.get(&Id::new(20)).is_none(),
+            "Stale channel 20 should be removed from channel_guild"
+        );
+        assert_eq!(cache.channel_guild.get(&Id::new(30)), Some(&Id::new(1)));
+    }
+
+    #[test]
+    fn insert_guild_keeps_channels_still_present() {
+        let mut cache = DiscordCache::default();
+        cache.insert_guild(make_guild(1, "Guild", vec![10, 20]));
+        // Re-insert with same channels — nothing should be removed
+        cache.insert_guild(make_guild(1, "Guild", vec![10, 20]));
+        assert_eq!(cache.channel_guild.get(&Id::new(10)), Some(&Id::new(1)));
+        assert_eq!(cache.channel_guild.get(&Id::new(20)), Some(&Id::new(1)));
+    }
+
     // --- Default ---
 
     #[test]

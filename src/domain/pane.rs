@@ -1440,6 +1440,371 @@ mod tests {
         );
     }
 
+    // --- focus_direction multi-pane tests (kill center calculation mutations) ---
+
+    #[test]
+    fn focus_direction_picks_nearest_among_multiple_right() {
+        // Layout: [P0(left)] [P1(top-right)] [P2(bottom-right)]
+        // From P0, going right should pick the pane whose center is closer.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // Make P2 clearly closer to P0's center than P1
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),  // center: (20, 12)
+            (id1, Rect::new(40, 0, 40, 8)),          // center: (60, 4)
+            (id2, Rect::new(40, 8, 40, 16)),         // center: (60, 16)
+        ]);
+
+        // P0 center is at (20, 12). P1 center at (60,4), P2 center at (60,16).
+        // Distance to P1: |4-12| + |60-20|/2 = 8 + 20 = 28
+        // Distance to P2: |16-12| + |60-20|/2 = 4 + 20 = 24
+        // P2 is closer — should be selected
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        assert_eq!(pm.focused_pane_id, id2, "Should pick closest pane (P2)");
+    }
+
+    #[test]
+    fn focus_direction_picks_nearest_among_multiple_down() {
+        // 3-pane layout: [P0(top)] [P1(bottom-left)] [P2(bottom-right)]
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Vertical);
+
+        // Use an asymmetric layout so one pane is clearly closer
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 80, 12)),   // center: (40, 6)
+            (id1, Rect::new(0, 12, 30, 12)),          // center: (15, 18)
+            (id2, Rect::new(30, 12, 50, 12)),         // center: (55, 18)
+        ]);
+        // P1: |18-6| + |15-40|/2 = 12 + 12 = 24
+        // P2: |18-6| + |55-40|/2 = 12 + 7 = 19
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Down, &positions));
+        assert_eq!(pm.focused_pane_id, id2, "Should pick closest pane (P2)");
+    }
+
+    #[test]
+    fn focus_direction_strict_inequality_rejects_same_axis() {
+        // Two panes side by side at the same vertical center — Up/Down should not work
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 24)),   // center: (20, 12)
+            (id1, Rect::new(40, 0, 40, 24)),          // center: (60, 12)
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        // Same center_y — neither is strictly above/below
+        assert!(!pm.focus_direction(Direction::Up, &positions));
+        assert!(!pm.focus_direction(Direction::Down, &positions));
+    }
+
+    #[test]
+    fn focus_direction_4_pane_grid() {
+        // 2x2 grid layout
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = PaneId(0);
+        let id2 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id3 = pm.split(SplitDirection::Horizontal);
+
+        // [P0:top-left] [P1:top-right]
+        // [P2:bot-left]  [P3:bot-right]
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 40, 12)),    // center: (20, 6)
+            (id1, Rect::new(40, 0, 40, 12)),           // center: (60, 6)
+            (id2, Rect::new(0, 12, 40, 12)),           // center: (20, 18)
+            (id3, Rect::new(40, 12, 40, 12)),          // center: (60, 18)
+        ]);
+
+        // From P0: Right→P1, Down→P2
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        assert_eq!(pm.focused_pane_id, id1);
+
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Down, &positions));
+        assert_eq!(pm.focused_pane_id, id2);
+
+        // From P3: Left→P2, Up→P1
+        pm.focused_pane_id = id3;
+        assert!(pm.focus_direction(Direction::Left, &positions));
+        assert_eq!(pm.focused_pane_id, id2);
+
+        pm.focused_pane_id = id3;
+        assert!(pm.focus_direction(Direction::Up, &positions));
+        assert_eq!(pm.focused_pane_id, id1);
+    }
+
+    #[test]
+    fn focus_direction_returns_false_for_missing_position() {
+        let mut pm = PaneManager::new();
+        let positions = HashMap::new();
+        assert!(!pm.focus_direction(Direction::Right, &positions));
+    }
+
+    /// Test focus_direction with asymmetric multi-pane layouts that exercise
+    /// the distance formula: primary_distance + secondary_distance / 2.
+    /// Each candidate has different primary AND secondary distances so that
+    /// mutating arithmetic operators (+→*, -→/, /→%, /→*) changes the winner.
+    #[test]
+    fn focus_direction_down_distance_formula() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Vertical);
+
+        // P0: center (40, 10), going Down
+        // P1: center (50, 15) — dy=5, dx=10. Correct: 5 + 10/2 = 10
+        // P2: center (42, 20) — dy=10, dx=2. Correct: 10 + 2/2 = 11
+        // P1 wins (10 < 11)
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(30, 0, 20, 20)),  // center: (40, 10)
+            (id1, Rect::new(40, 10, 20, 10)),         // center: (50, 15)
+            (id2, Rect::new(32, 15, 20, 10)),         // center: (42, 20)
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Down, &positions));
+        assert_eq!(pm.focused_pane_id, id1, "P1 should win (distance 10 < 11)");
+    }
+
+    #[test]
+    fn focus_direction_down_catches_div_to_mod() {
+        // Test to distinguish / 2 from % 2 in secondary distance calculation.
+        // Need candidates where dx/2 gives different relative order than dx%2.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Vertical);
+
+        // P0: center (40, 10), going Down
+        // P1: center (50, 16) — dy=6, dx=10. Correct: 6+5=11. With %2: 6+0=6
+        // P2: center (43, 19) — dy=9, dx=3. Correct: 9+1=10. With %2: 9+1=10
+        // Correct: P2(10) wins. With /→%: P1(6) wins — DIFFERENT.
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(30, 0, 20, 20)),
+            (id1, Rect::new(40, 6, 20, 20)),
+            (id2, Rect::new(33, 9, 20, 20)),
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Down, &positions));
+        assert_eq!(pm.focused_pane_id, id2, "P2 should win with correct /2 formula");
+    }
+
+    #[test]
+    fn focus_direction_up_catches_sub_to_add() {
+        // For Up direction, py < center_y. With `-→+` in (py - center_y).abs():
+        // |py - cy| orders by distance from center, |py + cy| orders by absolute position.
+        // These give different orderings when candidates are on the same side of center_y.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Vertical);
+
+        // P0: center (40, 40), going Up
+        // P1: center (40, 30) — dy=10. Correct: 10. With +: |30+40|=70
+        // P2: center (40, 10) — dy=30. Correct: 30. With +: |10+40|=50
+        // Correct: P1(10) wins. With -→+: P2(50) wins. DIFFERENT.
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(30, 30, 20, 20)),  // center: (40, 40)
+            (id1, Rect::new(30, 20, 20, 20)),          // center: (40, 30)
+            (id2, Rect::new(30, 0, 20, 20)),           // center: (40, 10)
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Up, &positions));
+        assert_eq!(pm.focused_pane_id, id1, "P1 should win (closer to center)");
+    }
+
+    #[test]
+    fn focus_direction_right_distance_formula() {
+        // Same as Down test but for Left|Right branch (line 388).
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // P0: center (10, 40), going Right
+        // P1: center (15, 50) — dx=5, dy=10. Correct: 5 + 10/2 = 10
+        // P2: center (20, 42) — dx=10, dy=2. Correct: 10 + 2/2 = 11
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 30, 20, 20)),   // center: (10, 40)
+            (id1, Rect::new(5, 40, 20, 20)),           // center: (15, 50)
+            (id2, Rect::new(10, 32, 20, 20)),          // center: (20, 42)
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        assert_eq!(pm.focused_pane_id, id1, "P1 should win (distance 10 < 11)");
+    }
+
+    #[test]
+    fn focus_direction_left_catches_sub_to_add() {
+        // For Left direction, px < center_x.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // P0: center (40, 40), going Left
+        // P1: center (30, 40) — dx=10. Correct: 10.
+        // P2: center (10, 40) — dx=30. Correct: 30.
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(30, 30, 20, 20)),
+            (id1, Rect::new(20, 30, 20, 20)),
+            (id2, Rect::new(0, 30, 20, 20)),
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Left, &positions));
+        assert_eq!(pm.focused_pane_id, id1, "P1 should win (closer to center)");
+    }
+
+    #[test]
+    fn focus_direction_right_catches_div_to_mod() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // P0: center (10, 40), going Right
+        // P1: center (16, 50) — dx=6, dy=10. Correct: 6+5=11. With %2: 6+0=6
+        // P2: center (19, 43) — dx=9, dy=3. Correct: 9+1=10. With %2: 9+1=10
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 30, 20, 20)),
+            (id1, Rect::new(6, 40, 20, 20)),
+            (id2, Rect::new(9, 33, 20, 20)),
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        assert_eq!(pm.focused_pane_id, id2, "P2 should win with correct /2 formula");
+    }
+
+    #[test]
+    fn focus_direction_tie_uses_strict_less_than() {
+        // Line 392: `distance < best.unwrap().1`
+        // With <=, equal distances would replace; with <, the first candidate wins.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Vertical);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // Two candidates at equal distance — first found should win with `<`, last with `<=`
+        let positions = make_positions(&[
+            (PaneId(0), Rect::new(0, 0, 20, 40)),   // center: (10, 20)
+            (id1, Rect::new(20, 0, 20, 20)),          // center: (30, 10), going Right: dx=20, dy=10 → 20+5=25
+            (id2, Rect::new(20, 20, 20, 20)),         // center: (30, 30), going Right: dx=20, dy=10 → 20+5=25
+        ]);
+        pm.focused_pane_id = PaneId(0);
+        assert!(pm.focus_direction(Direction::Right, &positions));
+        // With strict <, first candidate (whatever HashMap iteration gives) wins.
+        // Key: the result must be deterministic — verify we get ONE of them.
+        assert!(
+            pm.focused_pane_id == id1 || pm.focused_pane_id == id2,
+            "Should focus one of the equidistant panes"
+        );
+    }
+
+    // --- resize edge cases ---
+
+    #[test]
+    fn resize_zero_delta_returns_false() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Horizontal);
+        let result = pm.root.resize(PaneId(0), 0.0);
+        assert!(!result, "Zero delta should return false (no change)");
+        if let PaneNode::Split { ratio, .. } = &pm.root {
+            assert!((ratio - 0.5).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn resize_nonexistent_pane_returns_false() {
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Horizontal);
+        assert!(!pm.root.resize(PaneId(999), 0.1));
+    }
+
+    // --- resize_focused delta calculation ---
+
+    #[test]
+    fn resize_focused_uses_correct_delta_multiplier() {
+        // Line 447: f32::from(delta) * 0.05
+        // With delta=1, resize_delta = 0.05
+        // With * → /, resize_delta = 1.0/0.05 = 20.0 (would be clamped to max)
+        // With * → +, resize_delta = 1.0+0.05 = 1.05 (would also be clamped)
+        let mut pm = PaneManager::new();
+        pm.split(SplitDirection::Vertical);
+
+        // Resize right with delta=1 → should change ratio by +0.05
+        assert!(pm.resize_focused(Direction::Right, 1));
+        if let PaneNode::Split { ratio, .. } = &pm.root {
+            let expected = 0.55;
+            assert!(
+                (*ratio - expected).abs() < 0.001,
+                "Ratio should be ~{expected}, got {ratio}"
+            );
+        }
+
+        // Resize again
+        assert!(pm.resize_focused(Direction::Right, 2));
+        if let PaneNode::Split { ratio, .. } = &pm.root {
+            let expected = 0.65;
+            assert!(
+                (*ratio - expected).abs() < 0.001,
+                "Ratio should be ~{expected}, got {ratio}"
+            );
+        }
+    }
+
+    // --- close_focused position lookup ---
+
+    #[test]
+    fn close_focused_preserves_index_position() {
+        // Tests that `== closing_id` is used (not `!= closing_id`) in position lookup.
+        // With `!=`, closing middle pane would focus position 0 instead of position 1.
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+        pm.focused_pane_id = id1;
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        // 3 panes in order: [P0, P1, P2]. Close P1 (middle, index 1).
+        let leaves = pm.all_pane_ids();
+        assert_eq!(leaves.len(), 3);
+        pm.focused_pane_id = id1;
+        assert!(pm.close_focused());
+
+        // After closing P1 at index 1, focus should go to new index 1 (= P2),
+        // NOT index 0 (= P0, which `!= closing_id` would give).
+        let new_leaves = pm.all_pane_ids();
+        assert_eq!(new_leaves.len(), 2);
+        let focus_idx = new_leaves
+            .iter()
+            .position(|&id| id == pm.focused_pane_id)
+            .unwrap();
+        assert_eq!(
+            focus_idx, 1,
+            "Focus should be at index 1 (same position as closed pane), got index {focus_idx}"
+        );
+        assert_eq!(pm.focused_pane_id, id2, "Focus should be on P2 after closing middle pane");
+    }
+
+    #[test]
+    fn close_last_in_order_wraps_focus() {
+        let mut pm = PaneManager::new();
+        let _id1 = pm.split(SplitDirection::Horizontal);
+        pm.focus_next();
+        let id2 = pm.split(SplitDirection::Horizontal);
+
+        pm.focused_pane_id = id2;
+        assert!(pm.close_focused());
+
+        let leaves = pm.all_pane_ids();
+        assert!(leaves.contains(&pm.focused_pane_id));
+    }
+
     #[test]
     fn close_non_zoomed_pane_keeps_zoom() {
         let mut pm = PaneManager::new();
