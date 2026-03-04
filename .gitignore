@@ -21,6 +21,10 @@ ralph_log*.md
 .ralph_status_*.json
 /tmp/
 
+# Mutation testing
+mutants.out/
+mutants.out.old/
+
 # Nix
 result
 result-*
