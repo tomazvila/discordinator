@@ -21,18 +21,22 @@ impl<'a> StatusBar<'a> {
     fn connection_indicator(&self) -> Span<'static> {
         let theme = &self.state.theme;
         match &self.state.connection {
-            ConnectionState::Connected { .. } => {
-                Span::styled("● Connected", ratatui::style::Style::default().fg(theme.status_connected_fg))
-            }
-            ConnectionState::Connecting => {
-                Span::styled("◌ Connecting…", ratatui::style::Style::default().fg(theme.status_connecting_fg))
-            }
-            ConnectionState::Resuming { .. } => {
-                Span::styled("↻ Resuming…", ratatui::style::Style::default().fg(theme.status_connecting_fg))
-            }
-            ConnectionState::Disconnected => {
-                Span::styled("○ Disconnected", ratatui::style::Style::default().fg(theme.status_disconnected_fg))
-            }
+            ConnectionState::Connected { .. } => Span::styled(
+                "● Connected",
+                ratatui::style::Style::default().fg(theme.status_connected_fg),
+            ),
+            ConnectionState::Connecting => Span::styled(
+                "◌ Connecting…",
+                ratatui::style::Style::default().fg(theme.status_connecting_fg),
+            ),
+            ConnectionState::Resuming { .. } => Span::styled(
+                "↻ Resuming…",
+                ratatui::style::Style::default().fg(theme.status_connecting_fg),
+            ),
+            ConnectionState::Disconnected => Span::styled(
+                "○ Disconnected",
+                ratatui::style::Style::default().fg(theme.status_disconnected_fg),
+            ),
         }
     }
 
@@ -47,10 +51,9 @@ impl<'a> StatusBar<'a> {
                     .cache
                     .guilds
                     .get(&guild_id)
-                    .map(|g| g.name.as_str())
-                    .unwrap_or("Unknown");
+                    .map_or("Unknown", |g| g.name.as_str());
                 let channel_name = self.state.cache.resolve_channel_name(channel_id);
-                format!("{} > #{}", guild_name, channel_name)
+                format!("{guild_name} > #{channel_name}")
             }
             (None, Some(channel_id)) => {
                 format!("DM: {}", self.state.cache.resolve_channel_name(channel_id))
@@ -58,7 +61,10 @@ impl<'a> StatusBar<'a> {
             _ => "No channel selected".to_string(),
         };
 
-        Span::styled(text, ratatui::style::Style::default().fg(theme.status_bar_fg))
+        Span::styled(
+            text,
+            ratatui::style::Style::default().fg(theme.status_bar_fg),
+        )
     }
 
     fn mode_indicator(&self) -> Span<'static> {
@@ -86,7 +92,7 @@ impl<'a> StatusBar<'a> {
         if count > 1 {
             let theme = &self.state.theme;
             Some(Span::styled(
-                format!("[{} panes]", count),
+                format!("[{count} panes]"),
                 ratatui::style::Style::default().fg(theme.status_bar_fg),
             ))
         } else {
@@ -101,9 +107,7 @@ impl Widget for StatusBar<'_> {
 
         // Fill background
         for x in area.left()..area.right() {
-            buf[(x, area.y)]
-                .set_char(' ')
-                .set_style(style);
+            buf[(x, area.y)].set_char(' ').set_style(style);
         }
 
         let conn = self.connection_indicator();

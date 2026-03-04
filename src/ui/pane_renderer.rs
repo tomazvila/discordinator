@@ -24,7 +24,7 @@ pub fn render_pane_tree(area: Rect, buf: &mut Buffer, state: &AppState) {
     render_node(area, buf, state, &state.pane_manager.root);
 }
 
-/// Recursively render a PaneNode into the given area.
+/// Recursively render a `PaneNode` into the given area.
 fn render_node(area: Rect, buf: &mut Buffer, state: &AppState, node: &PaneNode) {
     match node {
         PaneNode::Leaf(pane) => {
@@ -49,9 +49,8 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
         return;
     }
 
-    let pane = match state.pane_manager.root.find(pane_id) {
-        Some(p) => p,
-        None => return,
+    let Some(pane) = state.pane_manager.root.find(pane_id) else {
+        return;
     };
 
     let is_focused = pane_id == state.pane_manager.focused_pane_id;
@@ -62,7 +61,7 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
 
     // Build title with zoom indicator
     let title = if is_zoomed {
-        format!("{} [Z]", title)
+        format!("{title} [Z]")
     } else {
         title
     };
@@ -77,7 +76,10 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(title, border_style.add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            title,
+            border_style.add_modifier(Modifier::BOLD),
+        ));
 
     let inner = block.inner(area);
     block.render(area, buf);
@@ -115,29 +117,21 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
 
     // Only render input box for focused pane
     if is_focused {
-        let input = InputBox::from_parts(
-            &pane.input,
-            state.input_mode,
-            &state.theme,
-        );
+        let input = InputBox::from_parts(&pane.input, state.input_mode, &state.theme);
         input.render(input_area, buf);
     }
 }
 
 /// Build the pane title string from cache lookups.
-fn build_pane_title(
-    state: &AppState,
-    pane: &crate::domain::pane::Pane,
-) -> String {
+fn build_pane_title(state: &AppState, pane: &crate::domain::pane::Pane) -> String {
     if let (Some(guild_id), Some(channel_id)) = (pane.guild_id, pane.channel_id) {
         let guild_name = state
             .cache
             .guilds
             .get(&guild_id)
-            .map(|g| g.name.as_str())
-            .unwrap_or("Unknown");
+            .map_or("Unknown", |g| g.name.as_str());
         let channel_name = state.cache.resolve_channel_name(channel_id);
-        format!(" {} > #{} ", guild_name, channel_name)
+        format!(" {guild_name} > #{channel_name} ")
     } else if let Some(channel_id) = pane.channel_id {
         format!(" #{} ", state.cache.resolve_channel_name(channel_id))
     } else {

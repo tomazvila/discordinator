@@ -29,16 +29,8 @@ impl<'a> InputBox<'a> {
         }
     }
 
-    pub fn from_parts(
-        input: &'a InputState,
-        mode: InputMode,
-        theme: &'a Theme,
-    ) -> Self {
-        Self {
-            input,
-            mode,
-            theme,
-        }
+    pub fn from_parts(input: &'a InputState, mode: InputMode, theme: &'a Theme) -> Self {
+        Self { input, mode, theme }
     }
 }
 
@@ -95,7 +87,7 @@ impl Widget for InputBox<'_> {
                     "Press 'i' to start typing"
                 };
                 let line = Line::from(Span::styled(
-                    format!(" {}", placeholder),
+                    format!(" {placeholder}"),
                     ratatui::style::Style::default().fg(self.theme.input_placeholder_fg),
                 ));
                 buf.set_line(area.x, current_y, &line, area.width);
@@ -159,11 +151,7 @@ pub fn move_cursor_home(input: &mut InputState) {
 /// Move cursor to the end of the input.
 pub fn move_cursor_end(input: &mut InputState) {
     input.cursor_pos = input.content.len();
-    input.cursor_col = input
-        .content
-        .chars()
-        .map(unicode_width)
-        .sum();
+    input.cursor_col = input.content.chars().map(unicode_width).sum();
 }
 
 /// Get the display width of a character.
@@ -174,7 +162,8 @@ pub fn unicode_width(c: char) -> usize {
         || c == '\u{200C}' // zero-width non-joiner
         || c == '\u{200D}' // zero-width joiner (ZWJ)
         || c == '\u{FEFF}' // BOM / zero-width no-break space
-        || ('\u{FE00}'..='\u{FE0F}').contains(&c) // variation selectors
+        || ('\u{FE00}'..='\u{FE0F}').contains(&c)
+    // variation selectors
     {
         return 0;
     }
@@ -194,7 +183,8 @@ pub fn unicode_width(c: char) -> usize {
         || ('\u{1FA00}'..='\u{1FA6F}').contains(&c) // Chess Symbols
         || ('\u{1FA70}'..='\u{1FAFF}').contains(&c) // Symbols and Pictographs Ext-A
         || ('\u{2600}'..='\u{27BF}').contains(&c)   // Misc Symbols, Dingbats
-        || ('\u{231A}'..='\u{23F3}').contains(&c)   // Misc Technical (clocks etc.)
+        || ('\u{231A}'..='\u{23F3}').contains(&c)
+    // Misc Technical (clocks etc.)
     {
         2
     } else {
@@ -344,7 +334,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let text: String = (0..40).map(|x| buf[(x, 0u16)].symbol().to_string()).collect::<String>();
+        let text: String = (0..40)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect::<String>();
         assert!(
             text.contains("Press 'i' to start typing"),
             "text was: {}",
@@ -362,12 +354,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let text: String = (0..40).map(|x| buf[(x, 0u16)].symbol().to_string()).collect::<String>();
-        assert!(
-            text.contains("Type a message"),
-            "text was: {}",
-            text
-        );
+        let text: String = (0..40)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect::<String>();
+        assert!(text.contains("Type a message"), "text was: {}", text);
     }
 
     #[test]
@@ -381,7 +371,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let text: String = (0..40).map(|x| buf[(x, 0u16)].symbol().to_string()).collect::<String>();
+        let text: String = (0..40)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect::<String>();
         assert!(text.contains("Hello world"), "text was: {}", text);
     }
 
@@ -396,7 +388,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let text: String = (0..50).map(|x| buf[(x, 0u16)].symbol().to_string()).collect::<String>();
+        let text: String = (0..50)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect::<String>();
         assert!(text.contains("Replying to"), "text was: {}", text);
     }
 
@@ -412,10 +406,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let line0: String = (0..50).map(|x| buf[(x, 0u16)].symbol().to_string()).collect::<String>();
+        let line0: String = (0..50)
+            .map(|x| buf[(x, 0u16)].symbol().to_string())
+            .collect::<String>();
         assert!(line0.contains("Editing"), "line0 was: {}", line0);
 
-        let line1: String = (0..50).map(|x| buf[(x, 1u16)].symbol().to_string()).collect::<String>();
+        let line1: String = (0..50)
+            .map(|x| buf[(x, 1u16)].symbol().to_string())
+            .collect::<String>();
         assert!(line1.contains("edited text"), "line1 was: {}", line1);
     }
 }
@@ -427,10 +425,7 @@ mod proptests {
 
     /// Compute cursor_col from content and cursor_pos for verification.
     fn expected_cursor_col(content: &str, cursor_pos: usize) -> usize {
-        content[..cursor_pos]
-            .chars()
-            .map(unicode_width)
-            .sum()
+        content[..cursor_pos].chars().map(unicode_width).sum()
     }
 
     // --- P4.1 & P4.2: cursor_pos is valid UTF-8 boundary and in bounds ---

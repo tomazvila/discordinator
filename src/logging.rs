@@ -12,7 +12,7 @@ const MAX_LOG_FILES: usize = 5;
 
 /// Initialize the tracing subscriber with file logging and env filter.
 ///
-/// Returns a WorkerGuard that must be held alive for the duration of the program.
+/// Returns a `WorkerGuard` that must be held alive for the duration of the program.
 /// When dropped, it flushes any remaining log output.
 pub fn init_logging(log_dir: &Path) -> Result<WorkerGuard> {
     std::fs::create_dir_all(log_dir)?;
@@ -27,8 +27,7 @@ pub fn init_logging(log_dir: &Path) -> Result<WorkerGuard> {
 
     let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
@@ -45,7 +44,7 @@ pub fn init_logging(log_dir: &Path) -> Result<WorkerGuard> {
 }
 
 /// Rotate log files: rename discordinator.log -> discordinator.1.log, etc.
-/// Delete files beyond MAX_LOG_FILES.
+/// Delete files beyond `MAX_LOG_FILES`.
 fn rotate_logs(log_dir: &Path) {
     let current_log = log_dir.join("discordinator.log");
     if !current_log.exists() {
@@ -60,12 +59,12 @@ fn rotate_logs(log_dir: &Path) {
     }
 
     // Delete the oldest log file if it exists
-    let oldest = log_dir.join(format!("discordinator.{}.log", MAX_LOG_FILES));
+    let oldest = log_dir.join(format!("discordinator.{MAX_LOG_FILES}.log"));
     let _ = std::fs::remove_file(oldest);
 
     // Shift existing rotated files
     for i in (1..MAX_LOG_FILES).rev() {
-        let from = log_dir.join(format!("discordinator.{}.log", i));
+        let from = log_dir.join(format!("discordinator.{i}.log"));
         let to = log_dir.join(format!("discordinator.{}.log", i + 1));
         let _ = std::fs::rename(from, to);
     }
@@ -94,7 +93,7 @@ pub fn install_panic_handler() -> Result<()> {
 
         // Now print the panic report
         let report = panic_hook.panic_report(panic_info);
-        eprintln!("{}", report);
+        eprintln!("{report}");
     }));
 
     Ok(())

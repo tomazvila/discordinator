@@ -1,4 +1,5 @@
 use color_eyre::eyre::Result;
+use secrecy::SecretString;
 
 /// Service name used for keyring storage.
 const SERVICE_NAME: &str = "discordinator";
@@ -7,7 +8,7 @@ const ACCOUNT_NAME: &str = "discord_token";
 
 /// Trait for token storage backends. Allows mocking in tests.
 pub trait TokenStore: Send + Sync {
-    fn get_token(&self) -> Result<Option<String>>;
+    fn get_token(&self) -> Result<Option<SecretString>>;
     fn set_token(&self, token: &str) -> Result<()>;
     fn delete_token(&self) -> Result<()>;
 }
@@ -16,11 +17,11 @@ pub trait TokenStore: Send + Sync {
 pub struct KeyringStore;
 
 impl TokenStore for KeyringStore {
-    fn get_token(&self) -> Result<Option<String>> {
+    fn get_token(&self) -> Result<Option<SecretString>> {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
             .map_err(|e| color_eyre::eyre::eyre!("Keyring entry error: {}", e))?;
         match entry.get_password() {
-            Ok(token) => Ok(Some(token)),
+            Ok(token) => Ok(Some(SecretString::from(token))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(color_eyre::eyre::eyre!("Keyring get error: {}", e)),
         }
@@ -39,8 +40,7 @@ impl TokenStore for KeyringStore {
         let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
             .map_err(|e| color_eyre::eyre::eyre!("Keyring entry error: {}", e))?;
         match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
             Err(e) => Err(color_eyre::eyre::eyre!("Keyring delete error: {}", e)),
         }
     }
@@ -65,8 +65,13 @@ impl MemoryTokenStore {
 }
 
 impl TokenStore for MemoryTokenStore {
-    fn get_token(&self) -> Result<Option<String>> {
-        Ok(self.token.lock().unwrap().clone())
+    fn get_token(&self) -> Result<Option<SecretString>> {
+        Ok(self
+            .token
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(SecretString::from))
     }
 
     fn set_token(&self, token: &str) -> Result<()> {
@@ -83,6 +88,7 @@ impl TokenStore for MemoryTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn memory_store_get_set_delete() {
@@ -94,8 +100,8 @@ mod tests {
         // Set and get
         store.set_token("test_token_123").unwrap();
         assert_eq!(
-            store.get_token().unwrap(),
-            Some("test_token_123".to_string())
+            store.get_token().unwrap().unwrap().expose_secret(),
+            "test_token_123"
         );
 
         // Delete
@@ -107,8 +113,8 @@ mod tests {
     fn memory_store_with_initial_token() {
         let store = MemoryTokenStore::with_token("initial_token");
         assert_eq!(
-            store.get_token().unwrap(),
-            Some("initial_token".to_string())
+            store.get_token().unwrap().unwrap().expose_secret(),
+            "initial_token"
         );
     }
 
@@ -116,7 +122,10 @@ mod tests {
     fn memory_store_overwrite_token() {
         let store = MemoryTokenStore::with_token("first");
         store.set_token("second").unwrap();
-        assert_eq!(store.get_token().unwrap(), Some("second".to_string()));
+        assert_eq!(
+            store.get_token().unwrap().unwrap().expose_secret(),
+            "second"
+        );
     }
 
     #[test]

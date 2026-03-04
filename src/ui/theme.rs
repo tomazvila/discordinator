@@ -101,6 +101,7 @@ impl Default for Theme {
 
 impl Theme {
     /// Apply custom border colors from config strings.
+    #[must_use]
     pub fn with_border_colors(mut self, active: &str, inactive: &str) -> Self {
         self.border_active = parse_color(active).unwrap_or(self.border_active);
         self.border_inactive = parse_color(inactive).unwrap_or(self.border_inactive);
@@ -126,7 +127,9 @@ impl Theme {
     }
 
     pub fn status_bar_style(&self) -> Style {
-        Style::default().fg(self.status_bar_fg).bg(self.status_bar_bg)
+        Style::default()
+            .fg(self.status_bar_fg)
+            .bg(self.status_bar_bg)
     }
 
     pub fn sidebar_style(&self) -> Style {

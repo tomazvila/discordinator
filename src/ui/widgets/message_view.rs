@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::domain::cache::DiscordCache;
-use crate::domain::types::*;
+use crate::domain::types::{CachedMessage, ScrollState};
 use crate::ui::theme::Theme;
 
 /// Message view widget rendering messages from a channel.
@@ -38,7 +38,7 @@ impl<'a> MessageView<'a> {
     }
 
     /// Calculate which messages are visible given the scroll state and area height.
-    /// Returns (start_index, end_index) into the messages VecDeque.
+    /// Returns (`start_index`, `end_index`) into the messages `VecDeque`.
     /// Accounts for date separators (+1 line when date changes) and
     /// attachments (+1 line per attachment).
     fn visible_range(&self, visible_lines: usize) -> (usize, usize) {
@@ -66,9 +66,7 @@ impl<'a> MessageView<'a> {
 
             // Date separator: rendered when date differs from previous message,
             // or for the first rendered message (prev_date starts as None).
-            if idx == 0
-                || msg.timestamp.get(..10) != self.messages[idx - 1].timestamp.get(..10)
-            {
+            if idx == 0 || msg.timestamp.get(..10) != self.messages[idx - 1].timestamp.get(..10) {
                 msg_lines += 1;
             }
 
@@ -136,13 +134,9 @@ impl Widget for MessageView<'_> {
                 prev_date = msg_date;
                 if y < area.bottom() {
                     let date_str = msg_date.unwrap_or("Unknown date");
-                    let separator = format!("── {} ──", date_str);
-                    let sep_line = Line::from(Span::styled(
-                        separator,
-                        self.theme.dim_style(),
-                    ));
-                    let sep_x =
-                        area.x + (area.width.saturating_sub(sep_line.width() as u16)) / 2;
+                    let separator = format!("── {date_str} ──");
+                    let sep_line = Line::from(Span::styled(separator, self.theme.dim_style()));
+                    let sep_x = area.x + (area.width.saturating_sub(sep_line.width() as u16)) / 2;
                     buf.set_line(sep_x, y, &sep_line, area.width);
                     y += 1;
                     if y >= area.bottom() {
@@ -176,12 +170,9 @@ impl Widget for MessageView<'_> {
 
             // Build the line
             let mut spans = vec![
+                Span::styled(format!("{time} "), self.theme.message_timestamp_style()),
                 Span::styled(
-                    format!("{} ", time),
-                    self.theme.message_timestamp_style(),
-                ),
-                Span::styled(
-                    format!("{}: ", author_name),
+                    format!("{author_name}: "),
                     self.theme.message_author_style(),
                 ),
                 Span::styled(&msg.content, bg_style),
@@ -199,8 +190,9 @@ impl Widget for MessageView<'_> {
             if is_selected {
                 // Highlight selected line
                 for x in area.left()..area.right() {
-                    buf[(x, y)]
-                        .set_style(ratatui::style::Style::default().bg(self.theme.message_selected_bg));
+                    buf[(x, y)].set_style(
+                        ratatui::style::Style::default().bg(self.theme.message_selected_bg),
+                    );
                 }
             }
 
@@ -226,7 +218,7 @@ impl Widget for MessageView<'_> {
 
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
@@ -242,6 +234,7 @@ pub fn is_following(scroll: &ScrollState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::types::{CachedUser, Id, MessageAttachment};
 
     fn make_msg(id: u64, author_id: u64, content: &str, timestamp: &str) -> CachedMessage {
         CachedMessage {
@@ -386,7 +379,7 @@ mod tests {
 
         let (start, end) = view.visible_range(10);
         assert_eq!(end, 20); // ends at the newest
-        // 9 messages + 1 date separator = 10 lines
+                             // 9 messages + 1 date separator = 10 lines
         assert_eq!(start, 11);
     }
 
@@ -409,7 +402,7 @@ mod tests {
 
         let (start, end) = view.visible_range(10);
         assert_eq!(end, 15); // 20 - 5 = 15
-        // 9 messages + 1 date separator = 10 lines
+                             // 9 messages + 1 date separator = 10 lines
         assert_eq!(start, 6);
     }
 

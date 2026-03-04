@@ -1,5 +1,5 @@
 /// Input mode state machine.
-/// Transitions: `i` → Insert, `Esc` → Normal, `:` → Command, `Ctrl+b` → PanePrefix.
+/// Transitions: `i` → Insert, `Esc` → Normal, `:` → Command, `Ctrl+b` → `PanePrefix`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     /// Navigation mode (vim Normal). Keys are commands.
@@ -12,7 +12,6 @@ pub enum InputMode {
     /// Pane prefix mode (after Ctrl+b). Next key is a pane command.
     PanePrefix,
 }
-
 
 impl InputMode {
     /// Display name for the status bar.

@@ -26,6 +26,7 @@
           nativeBuildInputs = [
             rustToolchain
             pkgs.pkg-config
+            pkgs.cargo-deny
           ];
 
           buildInputs = [

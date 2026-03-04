@@ -10,7 +10,7 @@ pub use twilight_model::id::{
 pub const MAX_CACHED_MESSAGES_PER_CHANNEL: usize = 200;
 
 /// Newtype for pane IDs - prevents mixing with Discord IDs.
-/// Discord IDs are Id<T> (NonZeroU64), PaneId is u32 - completely disjoint types.
+/// Discord IDs are Id<T> (`NonZeroU64`), `PaneId` is u32 - completely disjoint types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub u32);
 
@@ -242,7 +242,7 @@ pub enum HttpRequest {
     },
 }
 
-/// Requests sent to the SQLite worker task.
+/// Requests sent to the `SQLite` worker task.
 #[derive(Debug, Clone)]
 pub enum DbRequest {
     InsertMessage(CachedMessage),
@@ -587,7 +587,10 @@ mod tests {
             topic: Some("General chat".to_string()),
         };
         assert_eq!(channel.name, "general");
-        assert_eq!(channel.kind, twilight_model::channel::ChannelType::GuildText);
+        assert_eq!(
+            channel.kind,
+            twilight_model::channel::ChannelType::GuildText
+        );
     }
 
     #[test]

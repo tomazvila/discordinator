@@ -11,7 +11,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use crate::config::AppConfig;
 use crate::domain::cache::DiscordCache;
 use crate::domain::pane::PaneManager;
-use crate::domain::types::*;
+use crate::domain::types::{Action, ConnectionState, GuildMarker, Id, ScrollState, UserMarker};
 use crate::input::handler::handle_key_event;
 use crate::input::mode::InputMode;
 use crate::ui::theme::Theme;
@@ -23,7 +23,7 @@ pub struct SidebarState {
     pub selected_index: usize,
     /// Scroll offset for the sidebar list.
     pub scroll_offset: usize,
-    /// Set of collapsed guild IDs (guild_id → collapsed).
+    /// Set of collapsed guild IDs (`guild_id` → collapsed).
     pub collapsed_guilds: std::collections::HashSet<Id<GuildMarker>>,
 }
 
@@ -55,7 +55,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Create a new AppState with default single pane.
+    /// Create a new `AppState` with default single pane.
     pub fn new(config: AppConfig) -> Self {
         let theme = Theme::default().with_border_colors(
             &config.pane.active_border_color,
@@ -80,12 +80,16 @@ impl AppState {
 
     /// Get the currently focused pane.
     pub fn focused_pane(&self) -> &crate::domain::pane::Pane {
-        self.pane_manager.focused_pane().expect("always has at least one pane")
+        self.pane_manager
+            .focused_pane()
+            .expect("always has at least one pane")
     }
 
     /// Get the currently focused pane mutably.
     pub fn focused_pane_mut(&mut self) -> &mut crate::domain::pane::Pane {
-        self.pane_manager.focused_pane_mut().expect("always has at least one pane")
+        self.pane_manager
+            .focused_pane_mut()
+            .expect("always has at least one pane")
     }
 }
 
@@ -200,7 +204,7 @@ impl App {
         self.state.input_mode = new_mode;
 
         // Check for quit
-        if let Some(Action::Quit) | Some(Action::ForceQuit) = &action {
+        if let Some(Action::Quit | Action::ForceQuit) = &action {
             self.should_quit = true;
         }
 
@@ -215,6 +219,11 @@ impl App {
 }
 
 /// Apply an action to the app state. Returns true if state was modified (dirty).
+#[allow(
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::match_same_arms
+)]
 pub fn apply_action(action: Action, state: &mut AppState) -> bool {
     match action {
         // Mode transitions
@@ -274,7 +283,13 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
             // then mutate the pane's scroll state.
             let channel_id = state.focused_pane().channel_id;
             let max_offset = channel_id
-                .and_then(|ch| state.cache.messages.get(&ch).map(|msgs| msgs.len()))
+                .and_then(|ch| {
+                    state
+                        .cache
+                        .messages
+                        .get(&ch)
+                        .map(std::collections::VecDeque::len)
+                })
                 .unwrap_or(0);
             state.focused_pane_mut().scroll = ScrollState::Manual { offset: max_offset };
             true
@@ -330,12 +345,8 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
             state.pane_manager.split(direction);
             true
         }
-        Action::ClosePane => {
-            state.pane_manager.close_focused()
-        }
-        Action::ResizePane(dir, delta) => {
-            state.pane_manager.resize_focused(dir, delta)
-        }
+        Action::ClosePane => state.pane_manager.close_focused(),
+        Action::ResizePane(dir, delta) => state.pane_manager.resize_focused(dir, delta),
         Action::ToggleZoom => {
             state.pane_manager.toggle_zoom();
             true
@@ -346,10 +357,15 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         // Note: read from cache/pane immutably first, then mutate, to satisfy borrow checker
         Action::StartReply => {
             let pane = state.focused_pane();
-            let msg_id = pane.selected_message
-                .and_then(|idx| pane.channel_id.and_then(|ch| {
-                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx).map(|m| m.id))
-                }));
+            let msg_id = pane.selected_message.and_then(|idx| {
+                pane.channel_id.and_then(|ch| {
+                    state
+                        .cache
+                        .messages
+                        .get(&ch)
+                        .and_then(|msgs| msgs.get(idx).map(|m| m.id))
+                })
+            });
             if let Some(id) = msg_id {
                 state.focused_pane_mut().input.reply_to = Some(id);
                 state.input_mode = InputMode::Insert;
@@ -360,15 +376,21 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         }
         Action::StartEdit => {
             let pane = state.focused_pane();
-            let edit_info = pane.selected_message
-                .and_then(|idx| pane.channel_id.and_then(|ch| {
-                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx))
+            let edit_info = pane.selected_message.and_then(|idx| {
+                pane.channel_id.and_then(|ch| {
+                    state
+                        .cache
+                        .messages
+                        .get(&ch)
+                        .and_then(|msgs| msgs.get(idx))
                         .filter(|msg| Some(msg.author_id) == state.current_user_id)
                         .map(|msg| (msg.id, msg.content.clone()))
-                }));
+                })
+            });
             if let Some((id, content)) = edit_info {
                 let byte_len = content.len();
-                let display_width: usize = content.chars()
+                let display_width: usize = content
+                    .chars()
                     .map(crate::ui::widgets::input_box::unicode_width)
                     .sum();
                 let pane = state.focused_pane_mut();
@@ -384,12 +406,17 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         }
         Action::StartDelete => {
             let pane = state.focused_pane();
-            let msg_id = pane.selected_message
-                .and_then(|idx| pane.channel_id.and_then(|ch| {
-                    state.cache.messages.get(&ch).and_then(|msgs| msgs.get(idx))
+            let msg_id = pane.selected_message.and_then(|idx| {
+                pane.channel_id.and_then(|ch| {
+                    state
+                        .cache
+                        .messages
+                        .get(&ch)
+                        .and_then(|msgs| msgs.get(idx))
                         .filter(|msg| Some(msg.author_id) == state.current_user_id)
                         .map(|msg| msg.id)
-                }));
+                })
+            });
             if let Some(id) = msg_id {
                 state.focused_pane_mut().confirming_delete = Some(id);
                 true
@@ -414,8 +441,16 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         Action::SelectMessageUp => {
             // selected_message is an index from the bottom (0 = newest).
             // "Up" = visually up = older messages = increase index.
-            let max_idx = state.focused_pane().channel_id
-                .and_then(|ch| state.cache.messages.get(&ch).map(|msgs| msgs.len().saturating_sub(1)))
+            let max_idx = state
+                .focused_pane()
+                .channel_id
+                .and_then(|ch| {
+                    state
+                        .cache
+                        .messages
+                        .get(&ch)
+                        .map(|msgs| msgs.len().saturating_sub(1))
+                })
                 .unwrap_or(0);
             let pane = state.focused_pane_mut();
             if let Some(idx) = pane.selected_message {
@@ -449,6 +484,9 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::types::{
+        CachedChannel, CachedGuild, CachedUser, ChannelMarker, PaneId, SplitDirection,
+    };
 
     fn test_state() -> AppState {
         AppState::new(AppConfig::default())
@@ -666,9 +704,7 @@ mod tests {
             },
         );
         assert_eq!(cache.resolve_channel_name(Id::new(10)), "general");
-        assert!(cache
-            .resolve_channel_name(Id::new(999))
-            .contains("Unknown"));
+        assert!(cache.resolve_channel_name(Id::new(999)).contains("Unknown"));
     }
 
     #[test]
@@ -689,10 +725,7 @@ mod tests {
         let mut state = test_state();
         let channel_id = Id::new(10);
         let guild_id = Id::new(1);
-        state
-            .cache
-            .channel_guild
-            .insert(channel_id, guild_id);
+        state.cache.channel_guild.insert(channel_id, guild_id);
 
         apply_action(Action::SwitchChannel(channel_id), &mut state);
         assert_eq!(state.focused_pane().channel_id, Some(channel_id));

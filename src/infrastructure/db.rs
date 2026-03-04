@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use crate::domain::types::{
-    CachedMessage, Id, MessageAttachment, MessageEmbed, MessageMarker, MessageReference,
-    ChannelMarker, UserMarker,
+    CachedMessage, ChannelMarker, Id, MessageAttachment, MessageEmbed, MessageMarker,
+    MessageReference, UserMarker,
 };
 
 /// Initialize the database: create tables, indexes, and enable WAL mode.
@@ -87,7 +87,7 @@ pub fn insert_message(conn: &Connection, msg: &CachedMessage) -> Result<()> {
             serde_json::to_string(&msg.embeds).unwrap_or_default(),
             msg.message_reference.as_ref().map(|r| serde_json::to_string(r).unwrap_or_default()),
             serde_json::to_string(&msg.mentions.iter().map(|id| id.get()).collect::<Vec<_>>()).unwrap_or_default(),
-            msg.mention_everyone as i32,
+            i32::from(msg.mention_everyone),
         ],
     )?;
     Ok(())
@@ -103,7 +103,7 @@ pub fn insert_messages(conn: &mut Connection, messages: &[CachedMessage]) -> Res
     Ok(())
 }
 
-/// Fetch messages for a channel, ordered by timestamp descending, with optional before_timestamp filter.
+/// Fetch messages for a channel, ordered by timestamp descending, with optional `before_timestamp` filter.
 pub fn fetch_messages(
     conn: &Connection,
     channel_id: Id<ChannelMarker>,
@@ -114,14 +114,19 @@ pub fn fetch_messages(
         let mut stmt = conn.prepare(
             "SELECT id, channel_id, author_id, content, timestamp, edited_timestamp, attachments, embeds, message_reference, mentions, mention_everyone FROM messages WHERE channel_id = ?1 AND timestamp < ?2 ORDER BY timestamp DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![channel_id.get() as i64, before, limit], row_to_message)?;
-        rows.collect::<Result<Vec<_>, _>>().wrap_err("Failed to fetch messages")?
+        let rows = stmt.query_map(
+            params![channel_id.get() as i64, before, limit],
+            row_to_message,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .wrap_err("Failed to fetch messages")?
     } else {
         let mut stmt = conn.prepare(
             "SELECT id, channel_id, author_id, content, timestamp, edited_timestamp, attachments, embeds, message_reference, mentions, mention_everyone FROM messages WHERE channel_id = ?1 ORDER BY timestamp DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![channel_id.get() as i64, limit], row_to_message)?;
-        rows.collect::<Result<Vec<_>, _>>().wrap_err("Failed to fetch messages")?
+        rows.collect::<Result<Vec<_>, _>>()
+            .wrap_err("Failed to fetch messages")?
     };
 
     // Reverse to chronological order (oldest first)
@@ -129,7 +134,7 @@ pub fn fetch_messages(
     Ok(messages)
 }
 
-/// Update a message's content and edited_timestamp.
+/// Update a message's content and `edited_timestamp`.
 pub fn update_message(
     conn: &Connection,
     id: Id<MessageMarker>,
@@ -145,7 +150,10 @@ pub fn update_message(
 
 /// Delete a message by ID.
 pub fn delete_message(conn: &Connection, id: Id<MessageMarker>) -> Result<usize> {
-    let rows = conn.execute("DELETE FROM messages WHERE id = ?1", params![id.get() as i64])?;
+    let rows = conn.execute(
+        "DELETE FROM messages WHERE id = ?1",
+        params![id.get() as i64],
+    )?;
     Ok(rows)
 }
 
@@ -167,7 +175,7 @@ pub fn load_session(conn: &Connection, name: &str) -> Result<Option<String>> {
     Ok(result)
 }
 
-/// Convert a database row to a CachedMessage.
+/// Convert a database row to a `CachedMessage`.
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedMessage> {
     let id_val: i64 = row.get(0)?;
     let channel_id_val: i64 = row.get(1)?;
@@ -196,13 +204,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedMessage> {
         .and_then(|j| serde_json::from_str::<Vec<u64>>(&j).ok())
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|v| {
-            if v > 0 {
-                Some(Id::new(v))
-            } else {
-                None
-            }
-        })
+        .filter_map(|v| if v > 0 { Some(Id::new(v)) } else { None })
         .collect();
 
     Ok(CachedMessage {
@@ -225,7 +227,12 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedMessage> {
 mod tests {
     use super::*;
 
-    fn make_test_message(id: u64, channel_id: u64, content: &str, timestamp: &str) -> CachedMessage {
+    fn make_test_message(
+        id: u64,
+        channel_id: u64,
+        content: &str,
+        timestamp: &str,
+    ) -> CachedMessage {
         CachedMessage {
             id: Id::new(id),
             channel_id: Id::new(channel_id),
@@ -246,13 +253,21 @@ mod tests {
     fn schema_creation() {
         let conn = open_in_memory().unwrap();
         // Verify tables exist by querying them
-        let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
-        let count: i64 = conn.query_row("SELECT count(*) FROM channels", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM channels", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
-        let count: i64 = conn.query_row("SELECT count(*) FROM guilds", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM guilds", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
-        let count: i64 = conn.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -381,13 +396,7 @@ mod tests {
         ];
         insert_messages(&mut conn, &messages).unwrap();
 
-        let fetched = fetch_messages(
-            &conn,
-            Id::new(10),
-            Some("2024-01-01T02:00:00Z"),
-            50,
-        )
-        .unwrap();
+        let fetched = fetch_messages(&conn, Id::new(10), Some("2024-01-01T02:00:00Z"), 50).unwrap();
         assert_eq!(fetched.len(), 2);
         assert_eq!(fetched[0].content, "Old");
         assert_eq!(fetched[1].content, "Middle");

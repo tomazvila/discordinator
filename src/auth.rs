@@ -1,5 +1,6 @@
 use base64::Engine;
 use color_eyre::eyre::{eyre, Result};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::{AuthConfig, DiscordConfig};
 use crate::infrastructure::anti_detection;
@@ -8,26 +9,26 @@ use crate::infrastructure::keyring::TokenStore;
 /// Token retrieval priority:
 /// 1. Environment variable `DISCORD_TOKEN` (highest priority)
 /// 2. Keyring (OS secure storage)
-/// 3. Config file token_file path
+/// 3. Config file `token_file` path
 ///
 /// Returns None if no token is found from any source.
 pub fn retrieve_token(
     config: &AuthConfig,
     keyring: &dyn TokenStore,
     env_getter: &dyn Fn(&str) -> Option<String>,
-) -> Result<Option<String>> {
+) -> Result<Option<SecretString>> {
     // 1. Environment variable (highest priority)
     if let Some(token) = env_getter("DISCORD_TOKEN") {
         if !token.is_empty() {
             tracing::info!("Token found in DISCORD_TOKEN environment variable");
-            return Ok(Some(token));
+            return Ok(Some(SecretString::from(token)));
         }
     }
 
     // 2. Keyring
     if config.token_source == "keyring" {
         if let Some(token) = keyring.get_token()? {
-            if !token.is_empty() {
+            if !token.expose_secret().is_empty() {
                 tracing::info!("Token found in keyring");
                 return Ok(Some(token));
             }
@@ -44,7 +45,7 @@ pub fn retrieve_token(
             let token = token.trim().to_string();
             if !token.is_empty() {
                 tracing::info!("Token found in file: {}", token_file);
-                return Ok(Some(token));
+                return Ok(Some(SecretString::from(token)));
             }
         }
     }
@@ -78,7 +79,7 @@ fn shellexpand(path: &str) -> String {
 
 // === Task 39: Email + Password Login ===
 
-/// Response from login_with_credentials.
+/// Response from `login_with_credentials`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LoginResponse {
     /// Login successful, contains the auth token.
@@ -130,7 +131,7 @@ pub async fn login_with_credentials(
     });
 
     let response = client
-        .post(format!("{}/auth/login", api_base))
+        .post(format!("{api_base}/auth/login"))
         .json(&body)
         .send()
         .await
@@ -143,9 +144,7 @@ pub async fn login_with_credentials(
         .map_err(|e| eyre!("Failed to parse login response: {}", e))?;
 
     if !status.is_success() {
-        let message = response_body["message"]
-            .as_str()
-            .unwrap_or("Login failed");
+        let message = response_body["message"].as_str().unwrap_or("Login failed");
         return Err(eyre!("{}", message));
     }
 
@@ -184,7 +183,7 @@ pub async fn submit_mfa_totp(
     });
 
     let response = client
-        .post(format!("{}/auth/mfa/totp", api_base))
+        .post(format!("{api_base}/auth/mfa/totp"))
         .json(&body)
         .send()
         .await
@@ -280,7 +279,6 @@ pub async fn validate_token_via_gateway(
 
     match response_event {
         GatewayEvent::Ready(_) => Ok(true),
-        GatewayEvent::InvalidSession { .. } => Ok(false),
         _ => Ok(false),
     }
 }
@@ -376,7 +374,10 @@ impl QrAuthSession {
             .quiet_zone(true)
             .module_dimensions(2, 1)
             .build();
-        Ok(image.lines().map(|l| l.to_string()).collect())
+        Ok(image
+            .lines()
+            .map(std::string::ToString::to_string)
+            .collect())
     }
 }
 
@@ -388,7 +389,7 @@ pub fn build_qr_auth_init(encoded_public_key: &str) -> serde_json::Value {
     })
 }
 
-/// Build the QR auth "nonce_proof" WebSocket message.
+/// Build the QR auth "`nonce_proof`" WebSocket message.
 pub fn build_qr_auth_nonce_proof(proof: &str) -> serde_json::Value {
     serde_json::json!({
         "op": "nonce_proof",
@@ -455,9 +456,7 @@ pub fn parse_qr_auth_message(payload: &serde_json::Value) -> QrAuthMessage {
             ticket: payload["ticket"].as_str().unwrap_or("").to_string(),
         },
         "cancel" => QrAuthMessage::Cancel,
-        _ => QrAuthMessage::Unknown {
-            op: op.to_string(),
-        },
+        _ => QrAuthMessage::Unknown { op: op.to_string() },
     }
 }
 
@@ -501,7 +500,7 @@ mod tests {
         };
 
         let token = retrieve_token(&config, &keyring, &env_fn).unwrap();
-        assert_eq!(token, Some("env_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "env_token");
     }
 
     #[test]
@@ -510,7 +509,7 @@ mod tests {
         let keyring = MemoryTokenStore::with_token("keyring_token");
 
         let token = retrieve_token(&config, &keyring, &no_env).unwrap();
-        assert_eq!(token, Some("keyring_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "keyring_token");
     }
 
     #[test]
@@ -526,7 +525,7 @@ mod tests {
         let keyring = MemoryTokenStore::new(); // Empty keyring
 
         let token = retrieve_token(&config, &keyring, &no_env).unwrap();
-        assert_eq!(token, Some("file_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "file_token");
     }
 
     #[test]
@@ -555,7 +554,7 @@ mod tests {
         };
 
         let token = retrieve_token(&config, &keyring, &env_fn).unwrap();
-        assert_eq!(token, Some("keyring_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "keyring_token");
     }
 
     #[test]
@@ -576,8 +575,8 @@ mod tests {
 
         store_token(&keyring, "new_token_123").unwrap();
         assert_eq!(
-            keyring.get_token().unwrap(),
-            Some("new_token_123".to_string())
+            keyring.get_token().unwrap().unwrap().expose_secret(),
+            "new_token_123"
         );
     }
 
@@ -602,7 +601,7 @@ mod tests {
         let keyring = MemoryTokenStore::new();
 
         let token = retrieve_token(&config, &keyring, &no_env).unwrap();
-        assert_eq!(token, Some("trimmed_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "trimmed_token");
     }
 
     #[test]
@@ -651,16 +650,16 @@ mod tests {
             }
         };
         let token = retrieve_token(&config, &keyring, &env_fn).unwrap();
-        assert_eq!(token, Some("env_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "env_token");
 
         // Without env var → keyring wins
         let token = retrieve_token(&config, &keyring, &no_env).unwrap();
-        assert_eq!(token, Some("keyring_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "keyring_token");
 
         // Without env var or keyring → file wins
         let empty_keyring = MemoryTokenStore::new();
         let token = retrieve_token(&config, &empty_keyring, &no_env).unwrap();
-        assert_eq!(token, Some("file_token".to_string()));
+        assert_eq!(token.unwrap().expose_secret(), "file_token");
     }
 
     // === Task 39: Email + Password Login Tests ===
@@ -708,7 +707,10 @@ mod tests {
         let result = login_with_credentials("user@example.com", "password123", &config, &base_url)
             .await
             .unwrap();
-        assert_eq!(result, LoginResponse::Token("mfa.valid_token_123".to_string()));
+        assert_eq!(
+            result,
+            LoginResponse::Token("mfa.valid_token_123".to_string())
+        );
     }
 
     #[tokio::test]
@@ -839,8 +841,7 @@ mod tests {
         });
 
         let config = test_discord_config();
-        let _ =
-            login_with_credentials("test@example.com", "mypassword", &config, &base_url).await;
+        let _ = login_with_credentials("test@example.com", "mypassword", &config, &base_url).await;
 
         let request = captured_rx.recv().await.unwrap();
         // Find the body (after \r\n\r\n)

@@ -4,11 +4,8 @@ use crate::domain::types::{Action, Direction, SplitDirection};
 use crate::input::mode::InputMode;
 
 /// Process a key event in the context of the current input mode.
-/// Returns an optional Action and the (potentially changed) InputMode.
-pub fn handle_key_event(
-    key: KeyEvent,
-    mode: InputMode,
-) -> (Option<Action>, InputMode) {
+/// Returns an optional Action and the (potentially changed) `InputMode`.
+pub fn handle_key_event(key: KeyEvent, mode: InputMode) -> (Option<Action>, InputMode) {
     match mode {
         InputMode::Normal => handle_normal_mode(key),
         InputMode::Insert => handle_insert_mode(key),
@@ -84,9 +81,7 @@ fn handle_pane_prefix_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
         KeyCode::Left => Some(Action::FocusPaneDirection(Direction::Left)),
         KeyCode::Right => Some(Action::FocusPaneDirection(Direction::Right)),
 
-        // Esc cancels
-        KeyCode::Esc => None,
-
+        // Esc or any other key cancels
         _ => None,
     };
 

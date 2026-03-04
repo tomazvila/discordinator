@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{AppState, SidebarState};
 use crate::domain::cache::DiscordCache;
-use crate::domain::types::*;
+use crate::domain::types::{ChannelMarker, GuildMarker, Id};
 use crate::ui::theme::Theme;
 
 /// A flattened item in the server/channel tree for rendering.
@@ -59,8 +59,7 @@ pub fn build_tree(cache: &DiscordCache, sidebar: &SidebarState) -> Vec<TreeItem>
                         let mention_count = cache
                             .read_states
                             .get(&channel_id)
-                            .map(|rs| rs.mention_count)
-                            .unwrap_or(0);
+                            .map_or(0, |rs| rs.mention_count);
 
                         // Mark as unread if there's a read state entry
                         let has_read_state = cache.read_states.contains_key(&channel_id);
@@ -157,7 +156,7 @@ impl Widget for ServerTree<'_> {
                     name, collapsed, ..
                 } => {
                     let prefix = if *collapsed { "▸ " } else { "▾ " };
-                    let text = format!("{}{}", prefix, name);
+                    let text = format!("{prefix}{name}");
                     let item_style = if is_selected {
                         self.theme.sidebar_selected_style()
                     } else {
@@ -195,9 +194,10 @@ impl Widget for ServerTree<'_> {
                         style
                     };
 
-                    let mut text = format!("{}{}{}", indent_str, prefix, name);
+                    let mut text = format!("{indent_str}{prefix}{name}");
                     if *mention_count > 0 {
-                        text.push_str(&format!(" ({})", mention_count));
+                        use std::fmt::Write;
+                        let _ = write!(text, " ({mention_count})");
                     }
 
                     let line = Line::from(Span::styled(text, item_style));
@@ -220,7 +220,7 @@ impl Widget for ServerTree<'_> {
                     } else {
                         style
                     };
-                    let line = Line::from(Span::styled(format!("  {}", name), item_style));
+                    let line = Line::from(Span::styled(format!("  {name}"), item_style));
                     buf.set_line(area.x, y, &line, area.width);
                 }
             }
@@ -231,8 +231,7 @@ impl Widget for ServerTree<'_> {
 /// Get the channel ID at the given tree index, if any.
 pub fn channel_at_index(items: &[TreeItem], index: usize) -> Option<Id<ChannelMarker>> {
     items.get(index).and_then(|item| match item {
-        TreeItem::Channel { id, .. } => Some(*id),
-        TreeItem::DmChannel { id, .. } => Some(*id),
+        TreeItem::Channel { id, .. } | TreeItem::DmChannel { id, .. } => Some(*id),
         _ => None,
     })
 }
@@ -265,6 +264,7 @@ pub fn toggle_collapse(sidebar: &mut SidebarState, items: &[TreeItem]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::types::{CachedChannel, CachedGuild, ReadState};
     use std::collections::HashMap;
 
     fn setup_cache() -> (DiscordCache, SidebarState) {
@@ -336,9 +336,15 @@ mod tests {
         assert_eq!(items.len(), 4);
 
         assert!(matches!(&items[0], TreeItem::Guild { name, .. } if name == "Test Server"));
-        assert!(matches!(&items[1], TreeItem::Channel { name, is_category: true, .. } if name == "Text Channels"));
-        assert!(matches!(&items[2], TreeItem::Channel { name, is_category: false, .. } if name == "general"));
-        assert!(matches!(&items[3], TreeItem::Channel { name, is_category: false, .. } if name == "random"));
+        assert!(
+            matches!(&items[1], TreeItem::Channel { name, is_category: true, .. } if name == "Text Channels")
+        );
+        assert!(
+            matches!(&items[2], TreeItem::Channel { name, is_category: false, .. } if name == "general")
+        );
+        assert!(
+            matches!(&items[3], TreeItem::Channel { name, is_category: false, .. } if name == "random")
+        );
     }
 
     #[test]
@@ -348,7 +354,13 @@ mod tests {
 
         let items = build_tree(&cache, &sidebar);
         assert_eq!(items.len(), 1); // Only the guild header
-        assert!(matches!(&items[0], TreeItem::Guild { collapsed: true, .. }));
+        assert!(matches!(
+            &items[0],
+            TreeItem::Guild {
+                collapsed: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -459,11 +471,7 @@ mod tests {
         let line0: String = (0..30)
             .map(|x| buf[(x, 0u16)].symbol().to_string())
             .collect::<String>();
-        assert!(
-            line0.contains("Test Server"),
-            "line0 was: {}",
-            line0
-        );
+        assert!(line0.contains("Test Server"), "line0 was: {}", line0);
     }
 
     #[test]
@@ -480,11 +488,7 @@ mod tests {
         let line2: String = (0..30)
             .map(|x| buf[(x, 2u16)].symbol().to_string())
             .collect::<String>();
-        assert!(
-            line2.contains("general"),
-            "line2 was: {}",
-            line2
-        );
+        assert!(line2.contains("general"), "line2 was: {}", line2);
     }
 
     #[test]

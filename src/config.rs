@@ -164,7 +164,7 @@ fn default_token_source() -> String {
     "keyring".to_string()
 }
 fn default_client_build_number() -> u64 {
-    346892
+    346_892
 }
 fn default_browser_version() -> String {
     "131.0.0.0".to_string()
@@ -237,10 +237,10 @@ impl AppDirs {
 /// Load config from the given path, or return defaults if file doesn't exist.
 pub fn load_config(path: &std::path::Path) -> Result<AppConfig> {
     if path.exists() {
-        let content =
-            std::fs::read_to_string(path).wrap_err_with(|| format!("Failed to read {:?}", path))?;
+        let content = std::fs::read_to_string(path)
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
         let config: AppConfig = toml::from_str(&content)
-            .wrap_err_with(|| format!("Failed to parse config from {:?}", path))?;
+            .wrap_err_with(|| format!("Failed to parse config from {}", path.display()))?;
         Ok(config)
     } else {
         Ok(AppConfig::default())
@@ -254,13 +254,12 @@ pub fn load_or_create_config(path: &std::path::Path) -> Result<AppConfig> {
     } else {
         let config = AppConfig::default();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .wrap_err("Failed to create config directory")?;
+            std::fs::create_dir_all(parent).wrap_err("Failed to create config directory")?;
         }
-        let toml_string = toml::to_string_pretty(&config)
-            .wrap_err("Failed to serialize default config")?;
+        let toml_string =
+            toml::to_string_pretty(&config).wrap_err("Failed to serialize default config")?;
         std::fs::write(path, &toml_string)
-            .wrap_err_with(|| format!("Failed to write default config to {:?}", path))?;
+            .wrap_err_with(|| format!("Failed to write default config to {}", path.display()))?;
         Ok(config)
     }
 }
@@ -452,8 +451,16 @@ client_build_number = 111111
         assert!(dirs.config_dir.to_str().unwrap().contains("discordinator"));
         assert!(dirs.data_dir.to_str().unwrap().contains("discordinator"));
         assert!(dirs.cache_dir.to_str().unwrap().contains("discordinator"));
-        assert!(dirs.config_file().to_str().unwrap().ends_with("config.toml"));
-        assert!(dirs.database_file().to_str().unwrap().ends_with("messages.db"));
+        assert!(dirs
+            .config_file()
+            .to_str()
+            .unwrap()
+            .ends_with("config.toml"));
+        assert!(dirs
+            .database_file()
+            .to_str()
+            .unwrap()
+            .ends_with("messages.db"));
         assert!(dirs.log_dir().to_str().unwrap().ends_with("logs"));
     }
 

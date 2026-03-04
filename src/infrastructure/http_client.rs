@@ -7,7 +7,9 @@ use reqwest::header::HeaderMap;
 use tokio::sync::mpsc;
 
 use crate::config::DiscordConfig;
-use crate::domain::types::{BackgroundResult, CachedMessage, HttpRequest, Id, ChannelMarker, MessageMarker};
+use crate::domain::types::{
+    BackgroundResult, CachedMessage, ChannelMarker, HttpRequest, Id, MessageMarker,
+};
 use crate::infrastructure::anti_detection;
 
 /// Base URL for the Discord API.
@@ -105,7 +107,7 @@ impl HttpActor {
             let _ = self
                 .result_tx
                 .send(BackgroundResult::HttpError {
-                    request: format!("{:?}", request),
+                    request: format!("{request:?}"),
                     error: e.to_string(),
                 })
                 .await;
@@ -113,7 +115,7 @@ impl HttpActor {
     }
 
     /// Check and wait for rate limit on a given route.
-    async fn check_rate_limit(&mut self, route: &str) {
+    async fn check_rate_limit(&self, route: &str) {
         if let Some(bucket) = self.rate_limits.get(route) {
             if bucket.remaining == 0 && Instant::now() < bucket.reset_at {
                 let wait = bucket.reset_at - Instant::now();
@@ -152,7 +154,7 @@ impl HttpActor {
         nonce: &str,
         reply_to: Option<Id<MessageMarker>>,
     ) -> Result<()> {
-        let route = format!("POST /channels/{}/messages", channel_id);
+        let route = format!("POST /channels/{channel_id}/messages");
         self.check_rate_limit(&route).await;
 
         let mut body = serde_json::json!({
@@ -166,7 +168,7 @@ impl HttpActor {
             });
         }
 
-        let url = format!("{}/channels/{}/messages", DISCORD_API_BASE, channel_id);
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let response = self
             .client
             .post(&url)
@@ -196,14 +198,11 @@ impl HttpActor {
         message_id: Id<MessageMarker>,
         content: &str,
     ) -> Result<()> {
-        let route = format!("PATCH /channels/{}/messages", channel_id);
+        let route = format!("PATCH /channels/{channel_id}/messages");
         self.check_rate_limit(&route).await;
 
         let body = serde_json::json!({ "content": content });
-        let url = format!(
-            "{}/channels/{}/messages/{}",
-            DISCORD_API_BASE, channel_id, message_id
-        );
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
 
         let response = self
             .client
@@ -233,13 +232,10 @@ impl HttpActor {
         channel_id: Id<ChannelMarker>,
         message_id: Id<MessageMarker>,
     ) -> Result<()> {
-        let route = format!("DELETE /channels/{}/messages", channel_id);
+        let route = format!("DELETE /channels/{channel_id}/messages");
         self.check_rate_limit(&route).await;
 
-        let url = format!(
-            "{}/channels/{}/messages/{}",
-            DISCORD_API_BASE, channel_id, message_id
-        );
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
 
         let response = self
             .client
@@ -269,16 +265,14 @@ impl HttpActor {
         before: Option<Id<MessageMarker>>,
         limit: u8,
     ) -> Result<()> {
-        let route = format!("GET /channels/{}/messages", channel_id);
+        let route = format!("GET /channels/{channel_id}/messages");
         self.check_rate_limit(&route).await;
 
-        let mut url = format!(
-            "{}/channels/{}/messages?limit={}",
-            DISCORD_API_BASE, channel_id, limit
-        );
+        let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={limit}");
 
         if let Some(before_id) = before {
-            url.push_str(&format!("&before={}", before_id));
+            use std::fmt::Write;
+            let _ = write!(url, "&before={before_id}");
         }
 
         let response = self
@@ -300,7 +294,10 @@ impl HttpActor {
             ));
         }
 
-        let body_text = response.text().await.wrap_err("Failed to read response body")?;
+        let body_text = response
+            .text()
+            .await
+            .wrap_err("Failed to read response body")?;
         let messages = parse_messages_response(&body_text, channel_id)?;
 
         let _ = self
@@ -315,10 +312,10 @@ impl HttpActor {
     }
 
     async fn send_typing(&mut self, channel_id: Id<ChannelMarker>) -> Result<()> {
-        let route = format!("POST /channels/{}/typing", channel_id);
+        let route = format!("POST /channels/{channel_id}/typing");
         self.check_rate_limit(&route).await;
 
-        let url = format!("{}/channels/{}/typing", DISCORD_API_BASE, channel_id);
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/typing");
         let response = self
             .client
             .post(&url)
@@ -347,7 +344,7 @@ impl HttpActor {
     }
 }
 
-/// Parse a Discord messages response JSON array into CachedMessages.
+/// Parse a Discord messages response JSON array into `CachedMessages`.
 fn parse_messages_response(
     body: &str,
     channel_id: Id<ChannelMarker>,
@@ -366,7 +363,7 @@ fn parse_messages_response(
     Ok(result)
 }
 
-/// Convert a Discord message JSON object to a CachedMessage.
+/// Convert a Discord message JSON object to a `CachedMessage`.
 fn json_to_cached_message(
     msg: &serde_json::Value,
     channel_id: Id<ChannelMarker>,
@@ -383,7 +380,9 @@ fn json_to_cached_message(
 
     let content = msg["content"].as_str().unwrap_or("").to_string();
     let timestamp = msg["timestamp"].as_str().unwrap_or("").to_string();
-    let edited_timestamp = msg["edited_timestamp"].as_str().map(|s| s.to_string());
+    let edited_timestamp = msg["edited_timestamp"]
+        .as_str()
+        .map(std::string::ToString::to_string);
     let mention_everyone = msg["mention_everyone"].as_bool().unwrap_or(false);
 
     let mentions: Vec<Id<crate::domain::types::UserMarker>> = msg["mentions"]
@@ -410,7 +409,9 @@ fn json_to_cached_message(
                         filename: a["filename"].as_str()?.to_string(),
                         size: a["size"].as_u64().unwrap_or(0),
                         url: a["url"].as_str()?.to_string(),
-                        content_type: a["content_type"].as_str().map(|s| s.to_string()),
+                        content_type: a["content_type"]
+                            .as_str()
+                            .map(std::string::ToString::to_string),
                     })
                 })
                 .collect()
@@ -422,10 +423,12 @@ fn json_to_cached_message(
         .map(|arr| {
             arr.iter()
                 .map(|e| crate::domain::types::MessageEmbed {
-                    title: e["title"].as_str().map(|s| s.to_string()),
-                    description: e["description"].as_str().map(|s| s.to_string()),
+                    title: e["title"].as_str().map(std::string::ToString::to_string),
+                    description: e["description"]
+                        .as_str()
+                        .map(std::string::ToString::to_string),
                     color: e["color"].as_u64().map(|c| c as u32),
-                    url: e["url"].as_str().map(|s| s.to_string()),
+                    url: e["url"].as_str().map(std::string::ToString::to_string),
                 })
                 .collect()
         })
@@ -622,7 +625,10 @@ mod tests {
         // Dropping the sender should cause the actor to exit
         drop(req_tx);
         let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
-        assert!(result.is_ok(), "Actor should shut down when sender is dropped");
+        assert!(
+            result.is_ok(),
+            "Actor should shut down when sender is dropped"
+        );
     }
 
     #[tokio::test]

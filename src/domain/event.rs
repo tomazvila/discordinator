@@ -1,16 +1,20 @@
 use serde::Deserialize;
 
-use super::types::{Id, ChannelMarker, GuildMarker, MessageMarker, UserMarker};
+use super::types::{ChannelMarker, GuildMarker, Id, MessageMarker, UserMarker};
 
 /// Gateway events in user-account format.
 /// Deserialized from raw JSON, not twilight's built-in parser.
 #[derive(Debug, Clone)]
 pub enum GatewayEvent {
     // Connection lifecycle
-    Hello { heartbeat_interval: u64 },
+    Hello {
+        heartbeat_interval: u64,
+    },
     Ready(Box<ReadyEvent>),
     Resumed,
-    InvalidSession { resumable: bool },
+    InvalidSession {
+        resumable: bool,
+    },
     Reconnect,
     HeartbeatAck,
 
@@ -109,10 +113,10 @@ pub struct ChannelEvent {
     pub raw: serde_json::Value,
 }
 
-/// Parse a raw gateway JSON payload into a GatewayEvent.
+/// Parse a raw gateway JSON payload into a `GatewayEvent`.
 pub fn parse_gateway_payload(payload: &serde_json::Value) -> GatewayEvent {
     let op = payload["op"].as_u64().unwrap_or(0) as u8;
-    let event_name = payload["t"].as_str().map(|s| s.to_string());
+    let event_name = payload["t"].as_str().map(std::string::ToString::to_string);
     let data = &payload["d"];
 
     match op {
@@ -138,15 +142,13 @@ pub fn parse_gateway_payload(payload: &serde_json::Value) -> GatewayEvent {
 
 fn parse_dispatch_event(event_name: Option<&str>, data: &serde_json::Value) -> GatewayEvent {
     match event_name {
-        Some("READY") => {
-            match serde_json::from_value::<ReadyEvent>(data.clone()) {
-                Ok(ready) => GatewayEvent::Ready(Box::new(ready)),
-                Err(_) => GatewayEvent::Unknown {
-                    op: 0,
-                    event_name: Some("READY".to_string()),
-                },
-            }
-        }
+        Some("READY") => match serde_json::from_value::<ReadyEvent>(data.clone()) {
+            Ok(ready) => GatewayEvent::Ready(Box::new(ready)),
+            Err(_) => GatewayEvent::Unknown {
+                op: 0,
+                event_name: Some("READY".to_string()),
+            },
+        },
         Some("RESUMED") => GatewayEvent::Resumed,
         Some("MESSAGE_CREATE") => parse_message_create(data),
         Some("MESSAGE_UPDATE") => parse_message_update(data),
@@ -181,24 +183,27 @@ fn parse_dispatch_event(event_name: Option<&str>, data: &serde_json::Value) -> G
                 },
             }
         }
-        Some("CHANNEL_CREATE") => {
-            match parse_channel_event(data) {
-                Some(ch) => GatewayEvent::ChannelCreate(Box::new(ch)),
-                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_CREATE".to_string()) },
-            }
-        }
-        Some("CHANNEL_UPDATE") => {
-            match parse_channel_event(data) {
-                Some(ch) => GatewayEvent::ChannelUpdate(Box::new(ch)),
-                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_UPDATE".to_string()) },
-            }
-        }
-        Some("CHANNEL_DELETE") => {
-            match parse_channel_event(data) {
-                Some(ch) => GatewayEvent::ChannelDelete(Box::new(ch)),
-                None => GatewayEvent::Unknown { op: 0, event_name: Some("CHANNEL_DELETE".to_string()) },
-            }
-        }
+        Some("CHANNEL_CREATE") => match parse_channel_event(data) {
+            Some(ch) => GatewayEvent::ChannelCreate(Box::new(ch)),
+            None => GatewayEvent::Unknown {
+                op: 0,
+                event_name: Some("CHANNEL_CREATE".to_string()),
+            },
+        },
+        Some("CHANNEL_UPDATE") => match parse_channel_event(data) {
+            Some(ch) => GatewayEvent::ChannelUpdate(Box::new(ch)),
+            None => GatewayEvent::Unknown {
+                op: 0,
+                event_name: Some("CHANNEL_UPDATE".to_string()),
+            },
+        },
+        Some("CHANNEL_DELETE") => match parse_channel_event(data) {
+            Some(ch) => GatewayEvent::ChannelDelete(Box::new(ch)),
+            None => GatewayEvent::Unknown {
+                op: 0,
+                event_name: Some("CHANNEL_DELETE".to_string()),
+            },
+        },
         Some("TYPING_START") => {
             let channel_id = data["channel_id"]
                 .as_str()
@@ -224,15 +229,13 @@ fn parse_dispatch_event(event_name: Option<&str>, data: &serde_json::Value) -> G
         }
         _ => GatewayEvent::Unknown {
             op: 0,
-            event_name: event_name.map(|s| s.to_string()),
+            event_name: event_name.map(std::string::ToString::to_string),
         },
     }
 }
 
 fn parse_message_create(data: &serde_json::Value) -> GatewayEvent {
-    let id = data["id"]
-        .as_str()
-        .and_then(|s| s.parse::<u64>().ok());
+    let id = data["id"].as_str().and_then(|s| s.parse::<u64>().ok());
     let channel_id = data["channel_id"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok());
@@ -250,7 +253,13 @@ fn parse_message_create(data: &serde_json::Value) -> GatewayEvent {
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| m["id"].as_str().and_then(|s| s.parse::<u64>().ok()).filter(|&v| v > 0).map(Id::new))
+                .filter_map(|m| {
+                    m["id"]
+                        .as_str()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .filter(|&v| v > 0)
+                        .map(Id::new)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -277,23 +286,23 @@ fn parse_message_create(data: &serde_json::Value) -> GatewayEvent {
 }
 
 fn parse_message_update(data: &serde_json::Value) -> GatewayEvent {
-    let id = data["id"]
-        .as_str()
-        .and_then(|s| s.parse::<u64>().ok());
+    let id = data["id"].as_str().and_then(|s| s.parse::<u64>().ok());
     let channel_id = data["channel_id"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok());
 
     match (id, channel_id) {
-        (Some(id), Some(ch_id)) => {
-            GatewayEvent::MessageUpdate(Box::new(MessageUpdateEvent {
-                id: Id::new(id),
-                channel_id: Id::new(ch_id),
-                content: data["content"].as_str().map(|s| s.to_string()),
-                edited_timestamp: data["edited_timestamp"].as_str().map(|s| s.to_string()),
-                raw: data.clone(),
-            }))
-        }
+        (Some(id), Some(ch_id)) => GatewayEvent::MessageUpdate(Box::new(MessageUpdateEvent {
+            id: Id::new(id),
+            channel_id: Id::new(ch_id),
+            content: data["content"]
+                .as_str()
+                .map(std::string::ToString::to_string),
+            edited_timestamp: data["edited_timestamp"]
+                .as_str()
+                .map(std::string::ToString::to_string),
+            raw: data.clone(),
+        })),
         _ => GatewayEvent::Unknown {
             op: 0,
             event_name: Some("MESSAGE_UPDATE".to_string()),
@@ -302,21 +311,13 @@ fn parse_message_update(data: &serde_json::Value) -> GatewayEvent {
 }
 
 fn parse_guild_create(data: &serde_json::Value) -> GatewayEvent {
-    let id = data["id"]
-        .as_str()
-        .and_then(|s| s.parse::<u64>().ok());
+    let id = data["id"].as_str().and_then(|s| s.parse::<u64>().ok());
     let name = data["name"].as_str().unwrap_or("").to_string();
 
     match id {
         Some(id) => {
-            let channels = data["channels"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let roles = data["roles"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+            let channels = data["channels"].as_array().cloned().unwrap_or_default();
+            let roles = data["roles"].as_array().cloned().unwrap_or_default();
             GatewayEvent::GuildCreate(Box::new(GuildCreateEvent {
                 id: Id::new(id),
                 name,

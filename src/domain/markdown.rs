@@ -19,7 +19,7 @@ pub enum MarkdownSpan {
 
     /// Styled text (bold, italic, underline, strikethrough — can combine).
     Styled {
-        content: Vec<MarkdownSpan>,
+        content: Vec<Self>,
         style: MarkdownStyle,
     },
 
@@ -49,10 +49,11 @@ pub enum MarkdownSpan {
     },
 
     /// Spoiler (||text||).
-    Spoiler(Vec<MarkdownSpan>),
+    Spoiler(Vec<Self>),
 }
 
 /// Style flags for formatted text.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MarkdownStyle {
     pub bold: bool,

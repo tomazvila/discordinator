@@ -7,14 +7,14 @@ use twilight_model::id::{
 };
 
 /// Trait for resolving Discord entity names during rendering.
-/// Implemented by DiscordCache (or a mock in tests).
+/// Implemented by `DiscordCache` (or a mock in tests).
 pub trait MentionResolver {
     fn resolve_user(&self, id: Id<UserMarker>) -> Option<String>;
     fn resolve_channel(&self, id: Id<ChannelMarker>) -> Option<String>;
     fn resolve_role(&self, id: Id<RoleMarker>) -> Option<(String, u32)>; // (name, color)
 }
 
-/// Render a MarkdownAst into ratatui Lines with styles.
+/// Render a `MarkdownAst` into ratatui Lines with styles.
 pub fn render(ast: &MarkdownAst, resolver: &dyn MentionResolver) -> Vec<Line<'static>> {
     let mut lines: Vec<Vec<Span<'static>>> = vec![vec![]];
 
@@ -22,13 +22,10 @@ pub fn render(ast: &MarkdownAst, resolver: &dyn MentionResolver) -> Vec<Line<'st
         render_span(md_span, Style::default(), resolver, &mut lines);
     }
 
-    lines
-        .into_iter()
-        .map(Line::from)
-        .collect()
+    lines.into_iter().map(Line::from).collect()
 }
 
-/// Recursively render a MarkdownSpan into ratatui Spans, handling newlines.
+/// Recursively render a `MarkdownSpan` into ratatui Spans, handling newlines.
 fn render_span(
     md_span: &MarkdownSpan,
     base_style: Style,
@@ -77,39 +74,24 @@ fn render_span(
             }
             let code_style = Style::default().fg(Color::Gray);
             for line in content.lines() {
-                lines.push(vec![Span::styled(
-                    format!("  {line}"),
-                    code_style,
-                )]);
+                lines.push(vec![Span::styled(format!("  {line}"), code_style)]);
             }
         }
 
         MarkdownSpan::UserMention(id) => {
             let display = resolver
                 .resolve_user(*id)
-                .map(|name| format!("@{name}"))
-                .unwrap_or_else(|| format!("@{}", id.get()));
-            let style = base_style
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD);
-            lines
-                .last_mut()
-                .unwrap()
-                .push(Span::styled(display, style));
+                .map_or_else(|| format!("@{}", id.get()), |name| format!("@{name}"));
+            let style = base_style.fg(Color::LightBlue).add_modifier(Modifier::BOLD);
+            lines.last_mut().unwrap().push(Span::styled(display, style));
         }
 
         MarkdownSpan::ChannelMention(id) => {
             let display = resolver
                 .resolve_channel(*id)
-                .map(|name| format!("#{name}"))
-                .unwrap_or_else(|| format!("#{}", id.get()));
-            let style = base_style
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD);
-            lines
-                .last_mut()
-                .unwrap()
-                .push(Span::styled(display, style));
+                .map_or_else(|| format!("#{}", id.get()), |name| format!("#{name}"));
+            let style = base_style.fg(Color::LightBlue).add_modifier(Modifier::BOLD);
+            lines.last_mut().unwrap().push(Span::styled(display, style));
         }
 
         MarkdownSpan::RoleMention(id) => {
@@ -122,15 +104,10 @@ fn render_span(
                     .add_modifier(Modifier::BOLD);
                 (format!("@{name}"), style)
             } else {
-                let style = base_style
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD);
+                let style = base_style.fg(Color::LightBlue).add_modifier(Modifier::BOLD);
                 (format!("@{}", id.get()), style)
             };
-            lines
-                .last_mut()
-                .unwrap()
-                .push(Span::styled(display, style));
+            lines.last_mut().unwrap().push(Span::styled(display, style));
         }
 
         MarkdownSpan::CustomEmoji { name, .. } => {
@@ -149,7 +126,7 @@ fn render_span(
     }
 }
 
-/// Convert MarkdownStyle flags to a ratatui Style, layered on a base style.
+/// Convert `MarkdownStyle` flags to a ratatui Style, layered on a base style.
 fn markdown_style_to_ratatui(md_style: MarkdownStyle, base: Style) -> Style {
     let mut style = base;
     if md_style.bold {
@@ -282,11 +259,9 @@ mod tests {
         // First line is empty (before code block), then [rust] header, then code line
         assert!(lines.len() >= 2);
         // Find the language header
-        let lang_line = lines.iter().find(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.content.contains("[rust]"))
-        });
+        let lang_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("[rust]")));
         assert!(lang_line.is_some());
     }
 

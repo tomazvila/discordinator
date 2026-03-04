@@ -18,7 +18,7 @@ pub fn render_message_content<'a>(
     message.rendered.as_deref().unwrap()
 }
 
-/// Invalidate cached rendered output (call on MESSAGE_UPDATE).
+/// Invalidate cached rendered output (call on `MESSAGE_UPDATE`).
 pub fn invalidate_rendered(message: &mut CachedMessage) {
     message.rendered = None;
 }
@@ -146,7 +146,11 @@ mod tests {
         resolver.channels.insert(200, "general".to_string());
 
         let lines = render_message_content(&mut msg, &resolver);
-        let all_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        let all_text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
         assert!(all_text.contains("@Alice"));
         assert!(all_text.contains("#general"));
     }

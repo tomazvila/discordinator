@@ -1,13 +1,14 @@
 use crate::domain::markdown::{MarkdownAst, MarkdownSpan, MarkdownStyle};
 use twilight_model::id::Id;
 
-/// Parse Discord-flavored markdown into a MarkdownAst.
+/// Parse Discord-flavored markdown into a `MarkdownAst`.
 pub fn parse(input: &str) -> MarkdownAst {
     let spans = parse_inline(input, MarkdownStyle::default());
     MarkdownAst::new(merge_text_spans(spans))
 }
 
 /// Parse inline formatting within text, applying accumulated style.
+#[allow(clippy::too_many_lines)]
 fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
     let mut spans = Vec::new();
     let mut current_text = String::new();
@@ -25,12 +26,11 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
                 spans.push(block);
                 i = end;
                 continue;
-            } else {
-                // Unclosed code block: treat ``` as literal text
-                current_text.push_str("```");
-                i += 3;
-                continue;
             }
+            // Unclosed code block: treat ``` as literal text
+            current_text.push_str("```");
+            i += 3;
+            continue;
         }
 
         // Inline code (` ... `)
@@ -61,10 +61,7 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
         }
 
         // Mentions: <@id>, <@!id>, <@&id>, <#id>
-        if chars[i] == '<'
-            && i + 1 < len
-            && (chars[i + 1] == '@' || chars[i + 1] == '#')
-        {
+        if chars[i] == '<' && i + 1 < len && (chars[i + 1] == '@' || chars[i + 1] == '#') {
             if let Some((mention, end)) = parse_mention(&chars, i) {
                 if !current_text.is_empty() {
                     spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
@@ -167,7 +164,8 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
             if !preceded_by_word {
                 if let Some((content, end)) = find_closing(&chars, i + 1, "_") {
                     // Also check closing underscore is not followed by a word char
-                    let followed_by_word = end < len && (chars[end].is_alphanumeric() || chars[end] == '_');
+                    let followed_by_word =
+                        end < len && (chars[end].is_alphanumeric() || chars[end] == '_');
                     if !content.is_empty() && !followed_by_word {
                         if !current_text.is_empty() {
                             spans.push(MarkdownSpan::Text(std::mem::take(&mut current_text)));
@@ -234,7 +232,7 @@ fn parse_inline(input: &str, _style: MarkdownStyle) -> Vec<MarkdownSpan> {
     spans
 }
 
-/// Find closing delimiter and return (content_between, position_after_closing).
+/// Find closing delimiter and return (`content_between`, `position_after_closing`).
 /// For single-char delimiters like `*`, ensures we don't match part of a multi-char
 /// delimiter (e.g., `**` when looking for `*`).
 fn find_closing(chars: &[char], start: usize, delimiter: &str) -> Option<(String, usize)> {
@@ -311,7 +309,7 @@ fn find_closing(chars: &[char], start: usize, delimiter: &str) -> Option<(String
     None
 }
 
-/// Parse inline code: `content`. Returns (content, position_after_closing_backtick).
+/// Parse inline code: `content`. Returns (content, `position_after_closing_backtick`).
 fn parse_inline_code(chars: &[char], start: usize) -> Option<(String, usize)> {
     // start points to the opening `
     let mut i = start + 1;
@@ -325,7 +323,7 @@ fn parse_inline_code(chars: &[char], start: usize) -> Option<(String, usize)> {
     None
 }
 
-/// Parse code block: ```language\ncontent```. Returns (CodeBlock span, position after closing ```)
+/// Parse code block: triple-backtick language/content. Returns `(CodeBlock span, position after closing)`.
 fn parse_code_block(chars: &[char], start: usize) -> Option<(MarkdownSpan, usize)> {
     // start points to first `
     let block_start = start + 3;
@@ -365,32 +363,29 @@ fn parse_mention(chars: &[char], start: usize) -> Option<(MarkdownSpan, usize)> 
         // <@&id> - role mention
         if chars[i] == '&' {
             i += 1;
-            return parse_id_until_close(chars, i).map(|(id, end)| {
-                (MarkdownSpan::RoleMention(Id::new(id)), end)
-            });
+            return parse_id_until_close(chars, i)
+                .map(|(id, end)| (MarkdownSpan::RoleMention(Id::new(id)), end));
         }
         // <@!id> - nickname mention (treat same as user mention)
         if chars[i] == '!' {
             i += 1;
         }
         // <@id> - user mention
-        return parse_id_until_close(chars, i).map(|(id, end)| {
-            (MarkdownSpan::UserMention(Id::new(id)), end)
-        });
+        return parse_id_until_close(chars, i)
+            .map(|(id, end)| (MarkdownSpan::UserMention(Id::new(id)), end));
     }
 
     if chars[i] == '#' {
         i += 1;
         // <#id> - channel mention
-        return parse_id_until_close(chars, i).map(|(id, end)| {
-            (MarkdownSpan::ChannelMention(Id::new(id)), end)
-        });
+        return parse_id_until_close(chars, i)
+            .map(|(id, end)| (MarkdownSpan::ChannelMention(Id::new(id)), end));
     }
 
     None
 }
 
-/// Parse digits until '>' and return (parsed_u64, position_after_close).
+/// Parse digits until '>' and return (`parsed_u64`, `position_after_close`).
 fn parse_id_until_close(chars: &[char], start: usize) -> Option<(u64, usize)> {
     let mut i = start;
     while i < chars.len() && chars[i].is_ascii_digit() {
@@ -450,14 +445,7 @@ fn parse_custom_emoji(chars: &[char], start: usize) -> Option<(MarkdownSpan, usi
     let id: u64 = id_str.parse().ok()?;
     i += 1; // skip '>'
 
-    Some((
-        MarkdownSpan::CustomEmoji {
-            name,
-            id,
-            animated,
-        },
-        i,
-    ))
+    Some((MarkdownSpan::CustomEmoji { name, id, animated }, i))
 }
 
 /// Merge adjacent Text spans into one.
@@ -585,19 +573,13 @@ mod tests {
     #[test]
     fn user_mention() {
         let ast = parse("<@123456>");
-        assert_eq!(
-            ast.spans,
-            vec![MarkdownSpan::UserMention(Id::new(123456))]
-        );
+        assert_eq!(ast.spans, vec![MarkdownSpan::UserMention(Id::new(123456))]);
     }
 
     #[test]
     fn user_mention_with_nickname() {
         let ast = parse("<@!123456>");
-        assert_eq!(
-            ast.spans,
-            vec![MarkdownSpan::UserMention(Id::new(123456))]
-        );
+        assert_eq!(ast.spans, vec![MarkdownSpan::UserMention(Id::new(123456))]);
     }
 
     #[test]
@@ -612,10 +594,7 @@ mod tests {
     #[test]
     fn role_mention() {
         let ast = parse("<@&345678>");
-        assert_eq!(
-            ast.spans,
-            vec![MarkdownSpan::RoleMention(Id::new(345678))]
-        );
+        assert_eq!(ast.spans, vec![MarkdownSpan::RoleMention(Id::new(345678))]);
     }
 
     #[test]
@@ -763,10 +742,7 @@ mod tests {
     #[test]
     fn unclosed_code_treated_as_text() {
         let ast = parse("`unclosed code");
-        assert_eq!(
-            ast.spans,
-            vec![MarkdownSpan::Text("`unclosed code".into())]
-        );
+        assert_eq!(ast.spans, vec![MarkdownSpan::Text("`unclosed code".into())]);
     }
 
     #[test]

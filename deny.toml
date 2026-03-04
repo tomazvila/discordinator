@@ -1,0 +1,32 @@
+[advisories]
+unmaintained = "workspace"
+yanked = "deny"
+# rsa crate has a known timing sidechannel (RUSTSEC-2023-0071) with no fix available.
+# We only use RSA for QR auth locally, not in a network-observable context.
+ignore = ["RUSTSEC-2023-0071"]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+]
+# Our own crate is a private project, not published
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

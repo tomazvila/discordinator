@@ -26,10 +26,7 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &AppState) {
         let sidebar_width = state.config.appearance.sidebar_width;
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(sidebar_width),
-                Constraint::Min(10),
-            ])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(10)])
             .split(main_area);
 
         let sidebar_area = horizontal[0];
@@ -56,17 +53,10 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &AppState) {
 }
 
 /// Calculate the layout areas for testing purposes.
-pub fn calculate_layout(
-    area: Rect,
-    sidebar_visible: bool,
-    sidebar_width: u16,
-) -> LayoutAreas {
+pub fn calculate_layout(area: Rect, sidebar_visible: bool, sidebar_width: u16) -> LayoutAreas {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(area);
 
     let main_area = outer[0];
@@ -75,10 +65,7 @@ pub fn calculate_layout(
     let (sidebar_area, pane_area) = if sidebar_visible {
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(sidebar_width),
-                Constraint::Min(10),
-            ])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(10)])
             .split(main_area);
         (Some(horizontal[0]), horizontal[1])
     } else {
@@ -92,7 +79,7 @@ pub fn calculate_layout(
     }
 }
 
-/// Layout areas returned by calculate_layout for testing.
+/// Layout areas returned by `calculate_layout` for testing.
 #[derive(Debug)]
 pub struct LayoutAreas {
     pub sidebar: Option<Rect>,
@@ -103,9 +90,9 @@ pub struct LayoutAreas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
     use crate::config::AppConfig;
     use crate::domain::types::*;
+    use std::collections::VecDeque;
 
     #[test]
     fn layout_with_sidebar() {
@@ -287,24 +274,30 @@ mod tests {
         // Set up two channels
         let ch1 = Id::new(10);
         let ch2 = Id::new(20);
-        state.cache.channels.insert(ch1, CachedChannel {
-            id: ch1,
-            guild_id: None,
-            name: "alpha".to_string(),
-            kind: twilight_model::channel::ChannelType::GuildText,
-            position: 0,
-            parent_id: None,
-            topic: None,
-        });
-        state.cache.channels.insert(ch2, CachedChannel {
-            id: ch2,
-            guild_id: None,
-            name: "beta".to_string(),
-            kind: twilight_model::channel::ChannelType::GuildText,
-            position: 0,
-            parent_id: None,
-            topic: None,
-        });
+        state.cache.channels.insert(
+            ch1,
+            CachedChannel {
+                id: ch1,
+                guild_id: None,
+                name: "alpha".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        state.cache.channels.insert(
+            ch2,
+            CachedChannel {
+                id: ch2,
+                guild_id: None,
+                name: "beta".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
 
         // Assign channel to first pane, split, assign channel to second pane
         state.pane_manager.assign_channel(ch1, None);

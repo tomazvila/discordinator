@@ -3,6 +3,7 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, WrapErr};
 use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -17,19 +18,19 @@ const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress
 const ZLIB_SUFFIX: [u8; 4] = [0x00, 0x00, 0xFF, 0xFF];
 
 /// Gateway connection that runs as a tokio task.
-/// Sends parsed GatewayEvents to the provided channel.
+/// Sends parsed `GatewayEvents` to the provided channel.
 pub struct GatewayConnection {
-    token: String,
+    token: SecretString,
     config: DiscordConfig,
-    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    event_tx: mpsc::Sender<GatewayEvent>,
     gateway_url: String,
 }
 
 impl GatewayConnection {
     pub fn new(
-        token: String,
+        token: SecretString,
         config: DiscordConfig,
-        event_tx: mpsc::UnboundedSender<GatewayEvent>,
+        event_tx: mpsc::Sender<GatewayEvent>,
     ) -> Self {
         Self {
             token,
@@ -40,6 +41,7 @@ impl GatewayConnection {
     }
 
     /// Override the gateway URL (for testing with mock servers).
+    #[must_use]
     pub fn with_url(mut self, url: String) -> Self {
         self.gateway_url = url;
         self
@@ -47,6 +49,7 @@ impl GatewayConnection {
 
     /// Connect to the gateway and run the event loop.
     /// Returns session info on clean disconnect for RESUME support.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(self) -> Result<SessionInfo> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
             .await
@@ -141,7 +144,7 @@ impl GatewayConnection {
                             );
 
                             // Send IDENTIFY
-                            let identify = build_identify_payload(&self.token, &self.config);
+                            let identify = build_identify_payload(self.token.expose_secret(), &self.config);
                             let identify_text = serde_json::to_string(&identify)
                                 .wrap_err("Failed to serialize IDENTIFY")?;
                             write
@@ -174,7 +177,7 @@ impl GatewayConnection {
                     }
 
                     // Forward event to main loop
-                    if self.event_tx.send(gateway_event).is_err() {
+                    if self.event_tx.send(gateway_event).await.is_err() {
                         tracing::info!("Event channel closed, shutting down gateway");
                         break;
                     }
@@ -185,7 +188,7 @@ impl GatewayConnection {
                 }
 
                 // C1 fix: Actually send heartbeats on the interval
-                _ = &mut next_heartbeat => {
+                () = &mut next_heartbeat => {
                     // Zombie connection detection: if we didn't get ACK since last heartbeat, reconnect
                     if !heartbeat_ack_received {
                         tracing::warn!("No heartbeat ACK received since last heartbeat, connection is zombied");
@@ -226,11 +229,8 @@ impl GatewayConnection {
     }
 
     /// Connect and send RESUME instead of IDENTIFY.
-    pub async fn resume(
-        self,
-        session_id: &str,
-        sequence: u64,
-    ) -> Result<SessionInfo> {
+    #[allow(clippy::too_many_lines)]
+    pub async fn resume(self, session_id: &str, sequence: u64) -> Result<SessionInfo> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
             .await
             .wrap_err("Failed to connect to gateway for RESUME")?;
@@ -312,7 +312,7 @@ impl GatewayConnection {
                         } => {
                             // Send RESUME instead of IDENTIFY
                             let resume_payload = build_resume_payload(
-                                &self.token,
+                                self.token.expose_secret(),
                                 session_id,
                                 current_sequence.unwrap_or(sequence),
                             );
@@ -355,7 +355,7 @@ impl GatewayConnection {
                         _ => {}
                     }
 
-                    if self.event_tx.send(gateway_event).is_err() {
+                    if self.event_tx.send(gateway_event).await.is_err() {
                         break;
                     }
 
@@ -364,7 +364,7 @@ impl GatewayConnection {
                     }
                 }
 
-                _ = &mut next_heartbeat => {
+                () = &mut next_heartbeat => {
                     if !heartbeat_ack_received {
                         tracing::warn!("No heartbeat ACK received since last heartbeat (resume), connection is zombied");
                         break;
@@ -453,10 +453,9 @@ impl ZlibDecompressor {
         self.buffer.extend_from_slice(data);
 
         // Check for zlib-stream suffix indicating a complete message
-        if self.buffer.len() >= 4
-            && self.buffer[self.buffer.len() - 4..] == ZLIB_SUFFIX
-        {
+        if self.buffer.len() >= 4 && self.buffer[self.buffer.len() - 4..] == ZLIB_SUFFIX {
             let mut output = Vec::new();
+            #[allow(clippy::large_stack_arrays)]
             let mut chunk = [0u8; 32768];
             let input = std::mem::take(&mut self.buffer);
             let mut pos = 0;
@@ -465,9 +464,9 @@ impl ZlibDecompressor {
                 let before_in = self.decompress.total_in();
                 let before_out = self.decompress.total_out();
 
-                if let Err(e) = self
-                    .decompress
-                    .decompress(&input[pos..], &mut chunk, FlushDecompress::Sync)
+                if let Err(e) =
+                    self.decompress
+                        .decompress(&input[pos..], &mut chunk, FlushDecompress::Sync)
                 {
                     // Reset the decompressor so subsequent messages can be
                     // processed with a fresh context rather than a poisoned one.
@@ -489,8 +488,8 @@ impl ZlibDecompressor {
                 }
             }
 
-            let text = String::from_utf8(output)
-                .wrap_err("Decompressed data is not valid UTF-8")?;
+            let text =
+                String::from_utf8(output).wrap_err("Decompressed data is not valid UTF-8")?;
             Ok(Some(text))
         } else {
             Ok(None)
@@ -542,9 +541,9 @@ const INITIAL_BACKOFF_SECS: u64 = 1;
 /// Handles: initial connect, RESUME on disconnect, fallback to re-IDENTIFY,
 /// and exponential backoff on repeated failures.
 pub struct GatewayManager {
-    token: String,
+    token: SecretString,
     config: DiscordConfig,
-    event_tx: mpsc::UnboundedSender<GatewayEvent>,
+    event_tx: mpsc::Sender<GatewayEvent>,
     gateway_url: String,
     session: Option<SessionInfo>,
     backoff_secs: u64,
@@ -563,9 +562,9 @@ pub enum ReconnectAction {
 
 impl GatewayManager {
     pub fn new(
-        token: String,
+        token: SecretString,
         config: DiscordConfig,
-        event_tx: mpsc::UnboundedSender<GatewayEvent>,
+        event_tx: mpsc::Sender<GatewayEvent>,
     ) -> Self {
         Self {
             token,
@@ -578,6 +577,7 @@ impl GatewayManager {
     }
 
     /// Override the gateway URL (for testing).
+    #[must_use]
     pub fn with_url(mut self, url: String) -> Self {
         self.gateway_url = url;
         self
@@ -588,9 +588,7 @@ impl GatewayManager {
     pub async fn run(&mut self) -> Result<()> {
         loop {
             let result = if let Some(ref session) = self.session {
-                if let (Some(session_id), Some(seq)) =
-                    (&session.session_id, session.sequence)
-                {
+                if let (Some(session_id), Some(seq)) = (&session.session_id, session.sequence) {
                     // Try RESUME
                     tracing::info!("Attempting RESUME (session: {}, seq: {})", session_id, seq);
                     let conn = GatewayConnection::new(
@@ -633,10 +631,7 @@ impl GatewayManager {
             match action {
                 ReconnectAction::Resume => {
                     // Keep session, retry with RESUME
-                    tracing::info!(
-                        "Will attempt RESUME after {}s backoff",
-                        self.backoff_secs
-                    );
+                    tracing::info!("Will attempt RESUME after {}s backoff", self.backoff_secs);
                 }
                 ReconnectAction::Reconnect => {
                     // Clear session, do fresh IDENTIFY
@@ -797,7 +792,10 @@ mod tests {
         let payload = build_identify_payload("token", &config);
         assert_eq!(payload["d"]["properties"]["client_build_number"], 999999);
         assert_eq!(payload["d"]["properties"]["browser_version"], "200.0.0.0");
-        assert_eq!(payload["d"]["properties"]["browser_user_agent"], "Custom/1.0");
+        assert_eq!(
+            payload["d"]["properties"]["browser_user_agent"],
+            "Custom/1.0"
+        );
     }
 
     #[test]
@@ -900,8 +898,14 @@ mod tests {
         let compressed2 = encoder.get_ref()[len1..].to_vec();
 
         // Each segment should end with the sync flush marker
-        assert!(compressed1.ends_with(&ZLIB_SUFFIX), "msg1 should end with sync flush");
-        assert!(compressed2.ends_with(&ZLIB_SUFFIX), "msg2 should end with sync flush");
+        assert!(
+            compressed1.ends_with(&ZLIB_SUFFIX),
+            "msg1 should end with sync flush"
+        );
+        assert!(
+            compressed2.ends_with(&ZLIB_SUFFIX),
+            "msg2 should end with sync flush"
+        );
 
         // Decompress with persistent decompressor
         let mut decompressor = ZlibDecompressor::new();
@@ -942,7 +946,10 @@ mod tests {
                 let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(payload["op"], 2);
                 assert_eq!(payload["d"]["token"], "test_token");
-                assert!(payload["d"]["intents"].is_null(), "No intents for user accounts");
+                assert!(
+                    payload["d"]["intents"].is_null(),
+                    "No intents for user accounts"
+                );
                 assert_eq!(payload["d"]["properties"]["os"], "Mac OS X");
                 assert_eq!(payload["d"]["properties"]["browser"], "Chrome");
             }
@@ -992,18 +999,12 @@ mod tests {
         });
 
         // Connect gateway client
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new(
-            "test_token".to_string(),
-            config,
-            event_tx,
-        )
-        .with_url(format!("ws://{}", addr));
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
+            .with_url(format!("ws://{}", addr));
 
-        let gateway_handle = tokio::spawn(async move {
-            gateway.run().await
-        });
+        let gateway_handle = tokio::spawn(async move { gateway.run().await });
 
         // Collect events with timeout
         let mut events = Vec::new();
@@ -1034,10 +1035,19 @@ mod tests {
         let _ = server.await;
 
         // Verify events
-        assert!(events.len() >= 3, "Expected at least 3 events (Hello, Ready, MessageCreate), got {}", events.len());
+        assert!(
+            events.len() >= 3,
+            "Expected at least 3 events (Hello, Ready, MessageCreate), got {}",
+            events.len()
+        );
 
         // Hello
-        assert!(matches!(&events[0], GatewayEvent::Hello { heartbeat_interval: 45000 }));
+        assert!(matches!(
+            &events[0],
+            GatewayEvent::Hello {
+                heartbeat_interval: 45000
+            }
+        ));
 
         // Ready
         match &events[1] {
@@ -1105,18 +1115,12 @@ mod tests {
             let _ = write.send(Message::Close(None)).await;
         });
 
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new(
-            "test_token".to_string(),
-            config,
-            event_tx,
-        )
-        .with_url(format!("ws://{}", addr));
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
+            .with_url(format!("ws://{}", addr));
 
-        let gateway_handle = tokio::spawn(async move {
-            gateway.resume("old_session", 42).await
-        });
+        let gateway_handle = tokio::spawn(async move { gateway.resume("old_session", 42).await });
 
         // Collect events
         let mut events = Vec::new();
@@ -1159,9 +1163,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_initial_state() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         assert!(manager.session().is_none());
         assert_eq!(manager.backoff_secs(), INITIAL_BACKOFF_SECS);
@@ -1169,9 +1173,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_reconnect_action_no_session() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         let action = manager.determine_reconnect_action();
         assert_eq!(action, ReconnectAction::Reconnect);
@@ -1179,9 +1183,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_reconnect_action_with_session() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         manager.set_session(SessionInfo {
             session_id: Some("test_session".to_string()),
@@ -1196,9 +1200,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_reconnect_action_stop_when_channel_closed() {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<GatewayEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<GatewayEvent>(256);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         // Drop the receiver to close the channel
         drop(event_rx);
@@ -1209,9 +1213,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_stop_takes_priority_over_resume() {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<GatewayEvent>();
+        let (event_tx, event_rx) = mpsc::channel::<GatewayEvent>(256);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         // Set a valid session that would normally trigger Resume
         manager.set_session(SessionInfo {
@@ -1230,9 +1234,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_reset_backoff() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         // Simulate backoff growth
         manager.backoff_secs = 16;
@@ -1242,9 +1246,9 @@ mod tests {
 
     #[test]
     fn gateway_manager_session_info_incomplete_forces_reconnect() {
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new("token".to_string(), config, event_tx);
+        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
 
         // Session without sequence number
         manager.set_session(SessionInfo {
@@ -1273,27 +1277,29 @@ mod tests {
 
             // Send HELLO
             let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
-            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .unwrap();
 
             // Read IDENTIFY
             let _ = read.next().await;
 
             // Send Invalid Session (not resumable)
             let invalid = serde_json::json!({"op": 9, "d": false});
-            write.send(Message::Text(invalid.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(invalid.to_string().into()))
+                .await
+                .unwrap();
 
             // Close
             let _ = write.send(Message::Close(None)).await;
         });
 
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new(
-            "test_token".to_string(),
-            config,
-            event_tx,
-        )
-        .with_url(format!("ws://{}", addr));
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
+            .with_url(format!("ws://{}", addr));
 
         let session = gateway.run().await.unwrap();
 
@@ -1337,7 +1343,10 @@ mod tests {
             let (mut write, mut read) = ws.split();
 
             let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
-            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .unwrap();
 
             let _ = read.next().await; // IDENTIFY
 
@@ -1351,23 +1360,25 @@ mod tests {
                     "read_state": [], "relationships": []
                 }
             });
-            write.send(Message::Text(ready.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(ready.to_string().into()))
+                .await
+                .unwrap();
 
             // Send Reconnect
             let reconnect = serde_json::json!({"op": 7, "d": null});
-            write.send(Message::Text(reconnect.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(reconnect.to_string().into()))
+                .await
+                .unwrap();
 
             let _ = write.send(Message::Close(None)).await;
         });
 
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new(
-            "test_token".to_string(),
-            config,
-            event_tx,
-        )
-        .with_url(format!("ws://{}", addr));
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
+            .with_url(format!("ws://{}", addr));
 
         let session = gateway.run().await.unwrap();
 
@@ -1383,7 +1394,14 @@ mod tests {
 
         // Should have received Reconnect event
         let has_reconnect = events.iter().any(|e| matches!(e, GatewayEvent::Reconnect));
-        assert!(has_reconnect, "Expected a Reconnect event in {:?}", events.iter().map(|e| std::mem::discriminant(e)).collect::<Vec<_>>());
+        assert!(
+            has_reconnect,
+            "Expected a Reconnect event in {:?}",
+            events
+                .iter()
+                .map(|e| std::mem::discriminant(e))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1401,17 +1419,23 @@ mod tests {
             let (mut write, mut read) = ws.split();
 
             let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
-            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .unwrap();
             let _ = read.next().await; // RESUME
 
             let resumed = serde_json::json!({"op": 0, "t": "RESUMED", "s": 43, "d": {}});
-            write.send(Message::Text(resumed.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(resumed.to_string().into()))
+                .await
+                .unwrap();
             let _ = write.send(Message::Close(None)).await;
         });
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new("test_token".to_string(), config, event_tx)
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(url);
 
         let session = gateway.resume("old_session", 42).await.unwrap();
@@ -1434,7 +1458,10 @@ mod tests {
             let (mut write, mut read) = ws.split();
 
             let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
-            write.send(Message::Text(hello.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .unwrap();
             let _ = read.next().await; // IDENTIFY
 
             // Send READY first so session_id gets set
@@ -1448,17 +1475,23 @@ mod tests {
                     "read_state": [], "relationships": []
                 }
             });
-            write.send(Message::Text(ready.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(ready.to_string().into()))
+                .await
+                .unwrap();
 
             // Then send InvalidSession(false)
             let invalid = serde_json::json!({"op": 9, "d": false});
-            write.send(Message::Text(invalid.to_string().into())).await.unwrap();
+            write
+                .send(Message::Text(invalid.to_string().into()))
+                .await
+                .unwrap();
             let _ = write.send(Message::Close(None)).await;
         });
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::channel(256);
         let config = DiscordConfig::default();
-        let gateway = GatewayConnection::new("test_token".to_string(), config, event_tx)
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
         let session = gateway.run().await.unwrap();

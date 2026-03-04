@@ -65,9 +65,8 @@ impl LoginState {
     pub fn set_method(&mut self, method: LoginMethod) {
         self.method = method;
         self.active_field = match method {
-            LoginMethod::Token => LoginField::Token,
             LoginMethod::EmailPassword => LoginField::Email,
-            LoginMethod::QrCode => LoginField::Token, // QR has no input fields
+            LoginMethod::Token | LoginMethod::QrCode => LoginField::Token, // QR has no input fields
         };
         self.status = LoginStatus::Idle;
     }
@@ -99,8 +98,9 @@ impl LoginState {
             (LoginMethod::EmailPassword, LoginField::Password, LoginStatus::MfaRequired { .. }) => {
                 LoginField::MfaCode
             }
-            (LoginMethod::EmailPassword, LoginField::MfaCode, _) => LoginField::Email,
-            (LoginMethod::EmailPassword, LoginField::Password, _) => LoginField::Email,
+            (LoginMethod::EmailPassword, LoginField::MfaCode | LoginField::Password, _) => {
+                LoginField::Email
+            }
             _ => self.active_field,
         };
     }
@@ -168,7 +168,7 @@ impl LoginState {
     }
 }
 
-/// Login screen widget. Renders the login form based on LoginState.
+/// Login screen widget. Renders the login form based on `LoginState`.
 pub struct LoginScreen<'a> {
     pub state: &'a LoginState,
     pub qr_lines: Option<&'a [String]>,
@@ -182,6 +182,7 @@ impl<'a> LoginScreen<'a> {
         }
     }
 
+    #[must_use]
     pub fn with_qr_lines(mut self, lines: &'a [String]) -> Self {
         self.qr_lines = Some(lines);
         self
@@ -209,7 +210,7 @@ impl Widget for LoginScreen<'_> {
         // Layout: tabs | content | status
         let chunks = Layout::vertical([
             Constraint::Length(2), // Method tabs
-            Constraint::Min(5),   // Form content
+            Constraint::Min(5),    // Form content
             Constraint::Length(2), // Status bar
         ])
         .split(inner);
@@ -260,12 +261,12 @@ impl LoginScreen<'_> {
         let chunks = Layout::vertical([
             Constraint::Length(1), // Label
             Constraint::Length(3), // Input
-            Constraint::Min(0),   // Spacer
+            Constraint::Min(0),    // Spacer
         ])
         .split(area);
 
-        let label = Paragraph::new("Paste your Discord token:")
-            .style(Style::default().fg(Color::White));
+        let label =
+            Paragraph::new("Paste your Discord token:").style(Style::default().fg(Color::White));
         label.render(chunks[0], buf);
 
         let display_text = self.state.masked_display(LoginField::Token);
@@ -274,17 +275,15 @@ impl LoginScreen<'_> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let input = Paragraph::new(display_text)
-            .style(input_style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if self.state.active_field == LoginField::Token {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            );
+        let input = Paragraph::new(display_text).style(input_style).block(
+            Block::default().borders(Borders::ALL).border_style(
+                if self.state.active_field == LoginField::Token {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+        );
         input.render(chunks[1], buf);
     }
 
@@ -299,7 +298,7 @@ impl LoginScreen<'_> {
                 Constraint::Length(3), // Password input
                 Constraint::Length(1), // MFA label
                 Constraint::Length(3), // MFA input
-                Constraint::Min(0),   // Spacer
+                Constraint::Min(0),    // Spacer
             ]
         } else {
             vec![
@@ -307,7 +306,7 @@ impl LoginScreen<'_> {
                 Constraint::Length(3), // Email input
                 Constraint::Length(1), // Password label
                 Constraint::Length(3), // Password input
-                Constraint::Min(0),   // Spacer
+                Constraint::Min(0),    // Spacer
             ]
         };
 
@@ -324,15 +323,13 @@ impl LoginScreen<'_> {
         };
         let email_input = Paragraph::new(self.state.email_input.as_str())
             .style(email_style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if self.state.active_field == LoginField::Email {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            );
+            .block(Block::default().borders(Borders::ALL).border_style(
+                if self.state.active_field == LoginField::Email {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
         email_input.render(chunks[1], buf);
 
         // Password
@@ -345,17 +342,15 @@ impl LoginScreen<'_> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let pass_input = Paragraph::new(pass_display)
-            .style(pass_style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if self.state.active_field == LoginField::Password {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }),
-            );
+        let pass_input = Paragraph::new(pass_display).style(pass_style).block(
+            Block::default().borders(Borders::ALL).border_style(
+                if self.state.active_field == LoginField::Password {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+        );
         pass_input.render(chunks[3], buf);
 
         // MFA field (only if needed)
@@ -370,15 +365,13 @@ impl LoginScreen<'_> {
             };
             let mfa_input = Paragraph::new(self.state.mfa_input.as_str())
                 .style(mfa_style)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(if self.state.active_field == LoginField::MfaCode {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        }),
-                );
+                .block(Block::default().borders(Borders::ALL).border_style(
+                    if self.state.active_field == LoginField::MfaCode {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ));
             mfa_input.render(chunks[5], buf);
         }
     }
@@ -407,10 +400,7 @@ impl LoginScreen<'_> {
                 "Enter your 2FA code and press Enter",
                 Style::default().fg(Color::Yellow),
             ),
-            LoginStatus::Success(_) => (
-                "Login successful!",
-                Style::default().fg(Color::Green),
-            ),
+            LoginStatus::Success(_) => ("Login successful!", Style::default().fg(Color::Green)),
             LoginStatus::Error(msg) => {
                 let para = Paragraph::new(msg.as_str())
                     .style(Style::default().fg(Color::Red))
@@ -710,7 +700,11 @@ mod tests {
         let mut state = LoginState::default();
         state.set_method(LoginMethod::EmailPassword);
         let output = render_login_screen(&state, 60, 20);
-        assert!(output.contains("Email"), "Should show email label: {}", output);
+        assert!(
+            output.contains("Email"),
+            "Should show email label: {}",
+            output
+        );
         assert!(
             output.contains("Password"),
             "Should show password label: {}",

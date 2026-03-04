@@ -43,39 +43,37 @@ pub enum PaneNode {
     Split {
         direction: SplitDirection,
         ratio: f32,
-        first: Box<PaneNode>,
-        second: Box<PaneNode>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
 impl PaneNode {
-    /// Find a leaf by PaneId.
+    /// Find a leaf by `PaneId`.
     pub fn find(&self, id: PaneId) -> Option<&Pane> {
         match self {
-            PaneNode::Leaf(pane) => {
+            Self::Leaf(pane) => {
                 if pane.id == id {
                     Some(pane)
                 } else {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.find(id).or_else(|| second.find(id))
-            }
+            Self::Split { first, second, .. } => first.find(id).or_else(|| second.find(id)),
         }
     }
 
-    /// Find a mutable leaf by PaneId.
+    /// Find a mutable leaf by `PaneId`.
     pub fn find_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
         match self {
-            PaneNode::Leaf(pane) => {
+            Self::Leaf(pane) => {
                 if pane.id == id {
                     Some(pane)
                 } else {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
+            Self::Split { first, second, .. } => {
                 if let Some(pane) = first.find_mut(id) {
                     Some(pane)
                 } else {
@@ -94,8 +92,8 @@ impl PaneNode {
 
     fn collect_leaves(&self, result: &mut Vec<PaneId>) {
         match self {
-            PaneNode::Leaf(pane) => result.push(pane.id),
-            PaneNode::Split { first, second, .. } => {
+            Self::Leaf(pane) => result.push(pane.id),
+            Self::Split { first, second, .. } => {
                 first.collect_leaves(result);
                 second.collect_leaves(result);
             }
@@ -105,10 +103,8 @@ impl PaneNode {
     /// Count total leaf panes.
     pub fn leaf_count(&self) -> usize {
         match self {
-            PaneNode::Leaf(_) => 1,
-            PaneNode::Split { first, second, .. } => {
-                first.leaf_count() + second.leaf_count()
-            }
+            Self::Leaf(_) => 1,
+            Self::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
         }
     }
 
@@ -124,18 +120,14 @@ impl PaneNode {
         result
     }
 
-    fn collect_viewing_channel(
-        &self,
-        channel_id: Id<ChannelMarker>,
-        result: &mut Vec<PaneId>,
-    ) {
+    fn collect_viewing_channel(&self, channel_id: Id<ChannelMarker>, result: &mut Vec<PaneId>) {
         match self {
-            PaneNode::Leaf(pane) => {
+            Self::Leaf(pane) => {
                 if pane.channel_id == Some(channel_id) {
                     result.push(pane.id);
                 }
             }
-            PaneNode::Split { first, second, .. } => {
+            Self::Split { first, second, .. } => {
                 first.collect_viewing_channel(channel_id, result);
                 second.collect_viewing_channel(channel_id, result);
             }
@@ -147,24 +139,24 @@ impl PaneNode {
     /// Returns None if the pane is not found.
     pub fn split(&mut self, target_id: PaneId, direction: SplitDirection, new_id: PaneId) -> bool {
         match self {
-            PaneNode::Leaf(pane) => {
+            Self::Leaf(pane) => {
                 if pane.id == target_id {
                     let original = std::mem::replace(
                         self,
-                        PaneNode::Leaf(Pane::new(PaneId(0))), // placeholder
+                        Self::Leaf(Pane::new(PaneId(0))), // placeholder
                     );
-                    *self = PaneNode::Split {
+                    *self = Self::Split {
                         direction,
                         ratio: 0.5,
                         first: Box::new(original),
-                        second: Box::new(PaneNode::Leaf(Pane::new(new_id))),
+                        second: Box::new(Self::Leaf(Pane::new(new_id))),
                     };
                     true
                 } else {
                     false
                 }
             }
-            PaneNode::Split { first, second, .. } => {
+            Self::Split { first, second, .. } => {
                 first.split(target_id, direction, new_id)
                     || second.split(target_id, direction, new_id)
             }
@@ -176,7 +168,7 @@ impl PaneNode {
     /// Returns false if the pane doesn't exist or is the last remaining pane.
     pub fn remove(&mut self, target_id: PaneId) -> bool {
         // Can't remove if this is the only leaf
-        if let PaneNode::Leaf(_) = self {
+        if let Self::Leaf(_) = self {
             return false;
         }
         self.remove_inner(target_id)
@@ -184,10 +176,10 @@ impl PaneNode {
 
     fn remove_inner(&mut self, target_id: PaneId) -> bool {
         match self {
-            PaneNode::Leaf(_) => false,
-            PaneNode::Split { first, second, .. } => {
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
                 // Check if first child is the target leaf
-                if let PaneNode::Leaf(pane) = first.as_ref() {
+                if let Self::Leaf(pane) = first.as_ref() {
                     if pane.id == target_id {
                         // Promote second to take our place
                         *self = *second.clone();
@@ -195,7 +187,7 @@ impl PaneNode {
                     }
                 }
                 // Check if second child is the target leaf
-                if let PaneNode::Leaf(pane) = second.as_ref() {
+                if let Self::Leaf(pane) = second.as_ref() {
                     if pane.id == target_id {
                         // Promote first to take our place
                         *self = *first.clone();
@@ -212,8 +204,8 @@ impl PaneNode {
     /// Delta is applied to the ratio (clamped to 0.1..0.9).
     pub fn resize(&mut self, target_id: PaneId, delta: f32) -> bool {
         match self {
-            PaneNode::Leaf(_) => false,
-            PaneNode::Split {
+            Self::Leaf(_) => false,
+            Self::Split {
                 first,
                 second,
                 ratio,
@@ -354,20 +346,16 @@ impl PaneManager {
     }
 
     /// Move focus in a direction based on rendered pane positions.
-    /// `positions` maps PaneId → Rect for all currently rendered leaf panes.
+    /// `positions` maps `PaneId` → Rect for all currently rendered leaf panes.
     /// Returns true if focus actually changed.
-    pub fn focus_direction(
-        &mut self,
-        dir: Direction,
-        positions: &HashMap<PaneId, Rect>,
-    ) -> bool {
+    pub fn focus_direction(&mut self, dir: Direction, positions: &HashMap<PaneId, Rect>) -> bool {
         let current_rect = match positions.get(&self.focused_pane_id) {
             Some(r) => *r,
             None => return false,
         };
 
-        let center_x = current_rect.x as i32 + current_rect.width as i32 / 2;
-        let center_y = current_rect.y as i32 + current_rect.height as i32 / 2;
+        let center_x = i32::from(current_rect.x) + i32::from(current_rect.width) / 2;
+        let center_y = i32::from(current_rect.y) + i32::from(current_rect.height) / 2;
 
         let mut best: Option<(PaneId, i32)> = None;
 
@@ -376,8 +364,8 @@ impl PaneManager {
                 continue;
             }
 
-            let px = rect.x as i32 + rect.width as i32 / 2;
-            let py = rect.y as i32 + rect.height as i32 / 2;
+            let px = i32::from(rect.x) + i32::from(rect.width) / 2;
+            let py = i32::from(rect.y) + i32::from(rect.height) / 2;
 
             // Check if the candidate is in the right direction
             let in_direction = match dir {
@@ -416,11 +404,7 @@ impl PaneManager {
 
     /// Check if splitting the focused pane would result in panes that are too small.
     /// Minimum usable pane size: 10 columns wide, 4 rows tall.
-    pub fn can_split(
-        &self,
-        direction: SplitDirection,
-        positions: &HashMap<PaneId, Rect>,
-    ) -> bool {
+    pub fn can_split(&self, direction: SplitDirection, positions: &HashMap<PaneId, Rect>) -> bool {
         const MIN_PANE_WIDTH: u16 = 10;
         const MIN_PANE_HEIGHT: u16 = 4;
 
@@ -444,7 +428,7 @@ impl PaneManager {
     }
 
     /// Split the focused pane, but only if the result would be large enough.
-    /// Returns Some(new_id) on success, None if too small.
+    /// Returns `Some(new_id)` on success, None if too small.
     pub fn try_split(
         &mut self,
         direction: SplitDirection,
@@ -460,7 +444,7 @@ impl PaneManager {
     /// Resize the focused pane's parent split in a direction.
     /// Returns true if the resize was applied.
     pub fn resize_focused(&mut self, dir: Direction, delta: i16) -> bool {
-        let resize_delta = delta as f32 * 0.05; // Convert integer delta to ratio change
+        let resize_delta = f32::from(delta) * 0.05; // Convert integer delta to ratio change
         let adjustment = match dir {
             Direction::Left | Direction::Up => -resize_delta,
             Direction::Right | Direction::Down => resize_delta,
@@ -494,11 +478,7 @@ impl PaneManager {
 }
 
 /// Recursively compute leaf pane positions from the pane tree.
-fn compute_positions_inner(
-    node: &PaneNode,
-    area: Rect,
-    positions: &mut HashMap<PaneId, Rect>,
-) {
+fn compute_positions_inner(node: &PaneNode, area: Rect, positions: &mut HashMap<PaneId, Rect>) {
     match node {
         PaneNode::Leaf(pane) => {
             positions.insert(pane.id, area);
@@ -520,7 +500,7 @@ fn compute_positions_inner(
 pub fn split_area(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
     match direction {
         SplitDirection::Horizontal => {
-            let first_height = (area.height as f32 * ratio).round() as u16;
+            let first_height = (f32::from(area.height) * ratio).round() as u16;
             let first_height = first_height.min(area.height);
             let second_height = area.height.saturating_sub(first_height);
             (
@@ -529,7 +509,7 @@ pub fn split_area(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, R
             )
         }
         SplitDirection::Vertical => {
-            let first_width = (area.width as f32 * ratio).round() as u16;
+            let first_width = (f32::from(area.width) * ratio).round() as u16;
             let first_width = first_width.min(area.width);
             let second_width = area.width.saturating_sub(first_width);
             (
@@ -557,8 +537,8 @@ pub enum SessionNode {
     Split {
         direction: SplitDirection,
         ratio: f32,
-        first: Box<SessionNode>,
-        second: Box<SessionNode>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
@@ -594,7 +574,7 @@ impl PaneManager {
             root.leaves_in_order().first().copied().unwrap_or(PaneId(0))
         };
 
-        Some(PaneManager {
+        Some(Self {
             root,
             focused_pane_id: focused,
             zoom_state: None, // Zoom is not persisted
@@ -607,8 +587,8 @@ fn pane_node_to_session(node: &PaneNode) -> SessionNode {
     match node {
         PaneNode::Leaf(pane) => SessionNode::Leaf(SessionPane {
             id: pane.id,
-            channel_id: pane.channel_id.map(|id| id.get()),
-            guild_id: pane.guild_id.map(|id| id.get()),
+            channel_id: pane.channel_id.map(twilight_model::id::Id::get),
+            guild_id: pane.guild_id.map(twilight_model::id::Id::get),
         }),
         PaneNode::Split {
             direction,
@@ -1104,7 +1084,9 @@ mod tests {
     fn try_split_returns_none_if_too_small() {
         let mut pm = PaneManager::new();
         let positions = make_positions(&[(PaneId(0), Rect::new(0, 0, 10, 6))]);
-        assert!(pm.try_split(SplitDirection::Horizontal, &positions).is_none());
+        assert!(pm
+            .try_split(SplitDirection::Horizontal, &positions)
+            .is_none());
         assert_eq!(pm.pane_count(), 1);
     }
 
@@ -1384,10 +1366,7 @@ mod tests {
             pm.root.find(PaneId(0)).unwrap().channel_id,
             Some(Id::new(100))
         );
-        assert_eq!(
-            pm.root.find(id1).unwrap().channel_id,
-            Some(Id::new(200))
-        );
+        assert_eq!(pm.root.find(id1).unwrap().channel_id, Some(Id::new(200)));
     }
 
     #[test]
@@ -1451,8 +1430,14 @@ mod tests {
 
         // Close zoomed pane — zoom must clear regardless of where focus moves
         pm.close_focused();
-        assert!(pm.zoom_state.is_none(), "Zoom should be cleared when the zoomed pane is closed");
-        assert_ne!(pm.focused_pane_id, id1, "Focus should move away from closed pane");
+        assert!(
+            pm.zoom_state.is_none(),
+            "Zoom should be cleared when the zoomed pane is closed"
+        );
+        assert_ne!(
+            pm.focused_pane_id, id1,
+            "Focus should move away from closed pane"
+        );
     }
 
     #[test]
@@ -1467,7 +1452,11 @@ mod tests {
         // Close pane id1 (not the zoomed one)
         pm.focused_pane_id = id1;
         pm.close_focused();
-        assert_eq!(pm.zoom_state, Some(PaneId(0)), "Zoom should remain on the non-closed pane");
+        assert_eq!(
+            pm.zoom_state,
+            Some(PaneId(0)),
+            "Zoom should remain on the non-closed pane"
+        );
     }
 }
 

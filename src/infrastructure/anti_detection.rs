@@ -57,7 +57,10 @@ pub fn build_super_properties(config: &DiscordConfig) -> String {
 ///
 /// Returns an error if the config contains values that can't be encoded
 /// as HTTP header values (e.g., non-visible ASCII characters).
-pub fn build_http_headers(config: &DiscordConfig, token: &str) -> Result<HeaderMap, reqwest::header::InvalidHeaderValue> {
+pub fn build_http_headers(
+    config: &DiscordConfig,
+    token: &str,
+) -> Result<HeaderMap, reqwest::header::InvalidHeaderValue> {
     let mut headers = HeaderMap::new();
 
     headers.insert(
@@ -66,21 +69,12 @@ pub fn build_http_headers(config: &DiscordConfig, token: &str) -> Result<HeaderM
     );
 
     let super_props = build_super_properties(config);
-    headers.insert(
-        "X-Super-Properties",
-        HeaderValue::from_str(&super_props)?,
-    );
+    headers.insert("X-Super-Properties", HeaderValue::from_str(&super_props)?);
 
-    headers.insert(
-        "X-Discord-Locale",
-        HeaderValue::from_static("en-US"),
-    );
+    headers.insert("X-Discord-Locale", HeaderValue::from_static("en-US"));
 
     // User token without "Bot " prefix — this is critical for user accounts
-    headers.insert(
-        "Authorization",
-        HeaderValue::from_str(token)?,
-    );
+    headers.insert("Authorization", HeaderValue::from_str(token)?);
 
     Ok(headers)
 }
@@ -164,8 +158,7 @@ mod tests {
 
         // Must decode to valid JSON
         let json_str = String::from_utf8(decoded_bytes).expect("Must be valid UTF-8");
-        let json: serde_json::Value =
-            serde_json::from_str(&json_str).expect("Must be valid JSON");
+        let json: serde_json::Value = serde_json::from_str(&json_str).expect("Must be valid JSON");
 
         // Must contain the expected fields
         assert_eq!(json["os"], "Mac OS X");
@@ -238,11 +231,7 @@ mod tests {
         let config = test_config();
         let headers = build_http_headers(&config, "token").unwrap();
 
-        let super_props = headers
-            .get("X-Super-Properties")
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let super_props = headers.get("X-Super-Properties").unwrap().to_str().unwrap();
 
         // Must decode as base64 → JSON
         let decoded = base64::engine::general_purpose::STANDARD

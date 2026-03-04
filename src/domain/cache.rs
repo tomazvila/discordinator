@@ -1,6 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::domain::types::*;
+use crate::domain::types::{
+    CachedChannel, CachedGuild, CachedMessage, CachedRole, CachedUser, ChannelMarker, GuildMarker,
+    Id, MessageMarker, ReadState, RoleMarker, UserMarker, MAX_CACHED_MESSAGES_PER_CHANNEL,
+};
 
 /// In-memory cache of Discord state. All lookups are O(1) by ID.
 /// Optimized for the two hot paths: message receive and render.
@@ -17,7 +20,7 @@ pub struct DiscordCache {
     /// Per-channel message windows
     pub messages: HashMap<Id<ChannelMarker>, VecDeque<CachedMessage>>,
 
-    /// Per-channel typing indicators: (user_id, started_at)
+    /// Per-channel typing indicators: (`user_id`, `started_at`)
     pub typing: HashMap<Id<ChannelMarker>, Vec<(Id<UserMarker>, std::time::Instant)>>,
 
     /// Channel → Guild reverse lookup
@@ -33,23 +36,17 @@ pub struct DiscordCache {
 impl DiscordCache {
     /// Resolve a user ID to their display name (or username as fallback).
     pub fn resolve_user_name(&self, id: Id<UserMarker>) -> String {
-        self.users
-            .get(&id)
-            .map(|u| {
-                u.display_name
-                    .as_deref()
-                    .unwrap_or(&u.name)
-                    .to_string()
-            })
-            .unwrap_or_else(|| format!("Unknown({})", id.get()))
+        self.users.get(&id).map_or_else(
+            || format!("Unknown({})", id.get()),
+            |u| u.display_name.as_deref().unwrap_or(&u.name).to_string(),
+        )
     }
 
     /// Resolve a channel ID to its name.
     pub fn resolve_channel_name(&self, id: Id<ChannelMarker>) -> String {
         self.channels
             .get(&id)
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| format!("Unknown({})", id.get()))
+            .map_or_else(|| format!("Unknown({})", id.get()), |c| c.name.clone())
     }
 
     /// Resolve a role ID within a guild to its cached data.
@@ -64,7 +61,7 @@ impl DiscordCache {
     }
 
     /// Insert a message into the per-channel cache, evicting the oldest
-    /// if the channel exceeds MAX_CACHED_MESSAGES_PER_CHANNEL.
+    /// if the channel exceeds `MAX_CACHED_MESSAGES_PER_CHANNEL`.
     pub fn insert_message(&mut self, msg: CachedMessage) {
         let deque = self.messages.entry(msg.channel_id).or_default();
         deque.push_back(msg);
@@ -75,7 +72,11 @@ impl DiscordCache {
 
     /// Prepend messages to the front of a channel's message cache (history backfill).
     /// Evicts from the front if total exceeds capacity.
-    pub fn prepend_messages(&mut self, channel_id: Id<ChannelMarker>, messages: Vec<CachedMessage>) {
+    pub fn prepend_messages(
+        &mut self,
+        channel_id: Id<ChannelMarker>,
+        messages: Vec<CachedMessage>,
+    ) {
         let deque = self.messages.entry(channel_id).or_default();
         for msg in messages.into_iter().rev() {
             deque.push_front(msg);
@@ -119,7 +120,7 @@ impl DiscordCache {
         false
     }
 
-    /// Add a guild to the cache and update guild_order.
+    /// Add a guild to the cache and update `guild_order`.
     pub fn insert_guild(&mut self, guild: CachedGuild) {
         let id = guild.id;
         // Remove stale channel_guild entries from old guild data
@@ -248,7 +249,9 @@ mod tests {
     #[test]
     fn resolve_user_name_uses_display_name() {
         let mut cache = DiscordCache::default();
-        cache.users.insert(Id::new(1), make_user(1, "user1", Some("Display")));
+        cache
+            .users
+            .insert(Id::new(1), make_user(1, "user1", Some("Display")));
         assert_eq!(cache.resolve_user_name(Id::new(1)), "Display");
     }
 
@@ -271,7 +274,9 @@ mod tests {
     #[test]
     fn resolve_channel_name_found() {
         let mut cache = DiscordCache::default();
-        cache.channels.insert(Id::new(10), make_channel(10, Some(1), "general"));
+        cache
+            .channels
+            .insert(Id::new(10), make_channel(10, Some(1), "general"));
         assert_eq!(cache.resolve_channel_name(Id::new(10)), "general");
     }
 
@@ -395,10 +400,7 @@ mod tests {
         let mut cache = DiscordCache::default();
         cache.insert_message(make_message(10, 10, "existing"));
 
-        let history = vec![
-            make_message(1, 10, "old1"),
-            make_message(2, 10, "old2"),
-        ];
+        let history = vec![make_message(1, 10, "old1"), make_message(2, 10, "old2")];
         cache.prepend_messages(Id::new(10), history);
 
         let deque = cache.messages.get(&Id::new(10)).unwrap();
@@ -452,12 +454,7 @@ mod tests {
     #[test]
     fn update_message_not_found() {
         let mut cache = DiscordCache::default();
-        let found = cache.update_message(
-            Id::new(10),
-            Id::new(999),
-            "nope".to_string(),
-            None,
-        );
+        let found = cache.update_message(Id::new(10), Id::new(999), "nope".to_string(), None);
         assert!(!found);
     }
 
