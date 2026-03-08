@@ -365,17 +365,17 @@ async fn login_loop(
         match key.code {
             KeyCode::Esc => return Ok(None),
             KeyCode::Tab => state.next_field(),
-            KeyCode::Char('1') => {
+            KeyCode::F(1) => {
                 state.set_method(LoginMethod::Token);
                 qr_result_rx = None;
                 qr_lines = None;
             }
-            KeyCode::Char('2') => {
+            KeyCode::F(2) => {
                 state.set_method(LoginMethod::EmailPassword);
                 qr_result_rx = None;
                 qr_lines = None;
             }
-            KeyCode::Char('3') => {
+            KeyCode::F(3) => {
                 state.set_method(LoginMethod::QrCode);
                 if qr_result_rx.is_none() {
                     match start_qr_auth(config) {

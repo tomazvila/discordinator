@@ -233,9 +233,9 @@ impl Widget for LoginScreen<'_> {
 impl LoginScreen<'_> {
     fn render_tabs(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let tabs = [
-            ("1: Token", LoginMethod::Token),
-            ("2: Email/Pass", LoginMethod::EmailPassword),
-            ("3: QR Code", LoginMethod::QrCode),
+            ("F1: Token", LoginMethod::Token),
+            ("F2: Email/Pass", LoginMethod::EmailPassword),
+            ("F3: QR Code", LoginMethod::QrCode),
         ];
 
         let spans: Vec<Span> = tabs
@@ -392,7 +392,7 @@ impl LoginScreen<'_> {
     fn render_status(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let (text, style) = match &self.state.status {
             LoginStatus::Idle => (
-                "Press Enter to submit | Tab to switch fields | 1/2/3 to switch method",
+                "Enter to submit | Tab to switch fields | F1/F2/F3 to switch method",
                 Style::default().fg(Color::DarkGray),
             ),
             LoginStatus::Validating => ("Validating...", Style::default().fg(Color::Yellow)),
@@ -541,6 +541,19 @@ mod tests {
     }
 
     #[test]
+    fn login_state_digits_typed_into_password_field() {
+        let mut state = LoginState::default();
+        state.set_method(LoginMethod::EmailPassword);
+        state.active_field = LoginField::Password;
+        for c in "syjJom-vactap-pirji3".chars() {
+            state.type_char(c);
+        }
+        assert_eq!(state.password_input, "syjJom-vactap-pirji3");
+        // Digits 1, 2, 3 must NOT be eaten — they are normal characters
+        assert_eq!(state.method, LoginMethod::EmailPassword);
+    }
+
+    #[test]
     fn login_state_active_input_returns_correct_field() {
         let mut state = LoginState::default();
         state.token_input = "token123".to_string();
@@ -679,9 +692,9 @@ mod tests {
     fn login_screen_renders_token_tab_active() {
         let state = LoginState::default();
         let output = render_login_screen(&state, 60, 20);
-        assert!(output.contains("1: Token"), "Should show token tab");
-        assert!(output.contains("2: Email/Pass"), "Should show email tab");
-        assert!(output.contains("3: QR Code"), "Should show QR tab");
+        assert!(output.contains("F1: Token"), "Should show token tab");
+        assert!(output.contains("F2: Email/Pass"), "Should show email tab");
+        assert!(output.contains("F3: QR Code"), "Should show QR tab");
     }
 
     #[test]

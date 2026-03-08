@@ -143,8 +143,19 @@ pub async fn login_with_credentials(
         .await
         .map_err(|e| eyre!("Failed to parse login response: {}", e))?;
 
+    // Check for captcha requirement (Discord may require captcha for some accounts/IPs)
+    if response_body.get("captcha_key").is_some() {
+        return Err(eyre!(
+            "Discord requires a captcha. Email/password login is not available for this account/IP. Use token or QR code login instead."
+        ));
+    }
+
     if !status.is_success() {
         let message = response_body["message"].as_str().unwrap_or("Login failed");
+        // Include field-level errors if present (Discord returns detailed validation info)
+        if let Some(errors) = response_body.get("errors") {
+            return Err(eyre!("{}: {}", message, errors));
+        }
         return Err(eyre!("{}", message));
     }
 
@@ -851,6 +862,69 @@ mod tests {
             assert_eq!(parsed["login"], "test@example.com");
             assert_eq!(parsed["password"], "mypassword");
             assert_eq!(parsed["undelete"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn login_captcha_response_gives_clear_error() {
+        let body = r#"{"captcha_key":["captcha-required"],"captcha_sitekey":"abc","captcha_service":"hcaptcha"}"#;
+        let base_url = start_mock_http(400, body).await;
+        let config = test_discord_config();
+
+        let result =
+            login_with_credentials("user@example.com", "pass123", &config, &base_url).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("captcha"),
+            "Error should mention captcha: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn login_error_includes_field_details() {
+        let body = r#"{"message": "Invalid Form Body", "code": 50035, "errors": {"login": {"_errors": [{"code": "BASE_TYPE_REQUIRED", "message": "This field is required"}]}}}"#;
+        let base_url = start_mock_http(400, body).await;
+        let config = test_discord_config();
+
+        let result =
+            login_with_credentials("", "pass", &config, &base_url).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid Form Body") && err.contains("BASE_TYPE_REQUIRED"),
+            "Error should include both message and field errors: {}",
+            err
+        );
+    }
+
+    /// Integration test that calls the real Discord API.
+    /// Run with: cargo test login_real_discord -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn login_real_discord_returns_token() {
+        let config = DiscordConfig::default();
+        let result = login_with_credentials(
+            "kugismugis@proton.me",
+            "syjJom-vactap-pirji3",
+            &config,
+            "https://discord.com/api/v10",
+        )
+        .await;
+
+        match result {
+            Ok(LoginResponse::Token(token)) => {
+                println!("Login successful, token starts with: {}...", &token[..20]);
+                assert!(!token.is_empty());
+            }
+            Ok(LoginResponse::MfaRequired { ticket }) => {
+                println!("MFA required, ticket: {}", ticket);
+                // MFA is a valid response — login worked, just needs 2FA
+            }
+            Err(e) => {
+                panic!("Login failed: {}", e);
+            }
         }
     }
 
