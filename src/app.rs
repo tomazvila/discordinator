@@ -485,7 +485,7 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
 mod tests {
     use super::*;
     use crate::domain::types::{
-        CachedChannel, CachedGuild, CachedUser, ChannelMarker, PaneId, SplitDirection,
+        CachedChannel, CachedUser, PaneId, SplitDirection,
     };
 
     fn test_state() -> AppState {

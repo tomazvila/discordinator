@@ -1,12 +1,13 @@
 # CODEMAPS.md — Discordinator Codebase Map
 
-**34 source files, ~15,922 lines of Rust**
+**35 source files, ~16,746 lines of Rust**
 
 ## File Index
 
 | File | Lines | Layer | Purpose |
 |------|-------|-------|---------|
-| `src/main.rs` | 38 | App | Entry point, panic handler, tracing init |
+| `src/main.rs` | 662 | App | Entry point, async event loop, login wiring, DB worker, side-effect dispatch |
+| `src/event_handler.rs` | 856 | App | Gateway event → cache mutation, background result handling, JSON parsers |
 | `src/app.rs` | 869 | App | `AppState`, `apply_action()` central state mutation |
 | `src/auth.rs` | 1072 | App | Token retrieval, email/password login, QR auth, `validate_token_via_gateway` |
 | `src/config.rs` | 499 | App | TOML config with `AppConfig`, `DiscordConfig`, `AppDirs` |
@@ -50,7 +51,7 @@
 │  login.rs (self-contained login screen)         │
 ├─────────────────────────────────────────────────┤
 │  Application (src/app.rs, auth.rs, config.rs,   │
-│    logging.rs, input/, markdown/)                │
+│    event_handler.rs, logging.rs, input/, markdown/)│
 │  apply_action() = single state mutation point   │
 ├─────────────────────────────────────────────────┤
 │  Domain (src/domain/)                           │
@@ -128,6 +129,10 @@ DB Actor ──→ BackgroundResult ──→ main loop handles directly
 
 ```
 main.rs
+├── event_handler.rs (handle_gateway_event, handle_background_result)
+│   ├── domain/types.rs (CachedMessage, ConnectionState, DbRequest, BackgroundResult)
+│   ├── domain/cache.rs (DiscordCache)
+│   └── domain/event.rs (GatewayEvent)
 ├── app.rs (AppState, apply_action)
 │   ├── domain/types.rs (Action, all data types)
 │   ├── domain/cache.rs (DiscordCache)
