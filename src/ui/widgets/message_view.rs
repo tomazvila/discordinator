@@ -10,6 +10,7 @@ use ratatui::{
 use crate::domain::cache::DiscordCache;
 use crate::domain::types::{CachedMessage, ScrollState};
 use crate::ui::theme::Theme;
+use crate::ui::widgets::input_box::unicode_width;
 
 /// Message view widget rendering messages from a channel.
 pub struct MessageView<'a> {
@@ -37,11 +38,28 @@ impl<'a> MessageView<'a> {
         }
     }
 
-    /// Calculate which messages are visible given the scroll state and area height.
+    /// Compute the number of rendered lines for a message's content spans,
+    /// accounting for word wrapping at the given width.
+    fn message_content_lines(&self, msg: &CachedMessage, width: usize) -> usize {
+        if width == 0 {
+            return 1;
+        }
+        let author_name = self.cache.resolve_user_name(msg.author_id);
+        let time = msg.timestamp.get(11..16).unwrap_or("??:??");
+        let edited_len = if msg.edited_timestamp.is_some() { 9 } else { 0 }; // " (edited)"
+
+        let total_width = display_width(time) + 1 // "HH:MM "
+            + display_width(&author_name) + 2 // "name: "
+            + display_width(&msg.content)
+            + edited_len;
+
+        total_width.div_ceil(width).max(1)
+    }
+
+    /// Calculate which messages are visible given the scroll state and area.
     /// Returns (`start_index`, `end_index`) into the messages `VecDeque`.
-    /// Accounts for date separators (+1 line when date changes) and
-    /// attachments (+1 line per attachment).
-    fn visible_range(&self, visible_lines: usize) -> (usize, usize) {
+    /// Accounts for date separators, attachments, and word wrapping.
+    fn visible_range(&self, visible_lines: usize, width: usize) -> (usize, usize) {
         let msg_count = self.messages.len();
         if msg_count == 0 || visible_lines == 0 {
             return (0, 0);
@@ -61,8 +79,8 @@ impl<'a> MessageView<'a> {
             let idx = start - 1;
             let msg = &self.messages[idx];
 
-            // Each message uses 1 line for content + 1 per attachment
-            let mut msg_lines = 1 + msg.attachments.len();
+            // Content lines (wrapped) + 1 per attachment
+            let mut msg_lines = self.message_content_lines(msg, width) + msg.attachments.len();
 
             // Date separator: rendered when date differs from previous message,
             // or for the first rendered message (prev_date starts as None).
@@ -93,6 +111,76 @@ impl<'a> MessageView<'a> {
     }
 }
 
+/// Compute the display width of a string.
+fn display_width(s: &str) -> usize {
+    s.chars().map(unicode_width).sum()
+}
+
+/// Wrap a list of spans into multiple lines, each fitting within `max_width` columns.
+fn wrap_spans(spans: Vec<Span<'_>>, max_width: usize) -> Vec<Line<'_>> {
+    if max_width == 0 {
+        return vec![Line::from(spans)];
+    }
+
+    let mut result: Vec<Line> = Vec::new();
+    let mut current_line: Vec<Span> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in spans {
+        let style = span.style;
+        let text = span.content.into_owned();
+        let mut remaining: &str = &text;
+
+        while !remaining.is_empty() {
+            let available = max_width.saturating_sub(current_width);
+            if available == 0 {
+                result.push(Line::from(std::mem::take(&mut current_line)));
+                current_width = 0;
+                continue;
+            }
+
+            // Find how many chars fit in `available` width
+            let mut taken_width = 0;
+            let mut byte_end = 0;
+            for ch in remaining.chars() {
+                let cw = unicode_width(ch);
+                if taken_width + cw > available {
+                    break;
+                }
+                taken_width += cw;
+                byte_end += ch.len_utf8();
+            }
+
+            if byte_end == 0 {
+                // Wide char doesn't fit — force new line
+                if !current_line.is_empty() {
+                    result.push(Line::from(std::mem::take(&mut current_line)));
+                    current_width = 0;
+                }
+                // Take at least one char
+                let ch = remaining.chars().next().unwrap();
+                byte_end = ch.len_utf8();
+                taken_width = unicode_width(ch);
+            }
+
+            let chunk = &remaining[..byte_end];
+            current_line.push(Span::styled(chunk.to_string(), style));
+            current_width += taken_width;
+            remaining = &remaining[byte_end..];
+        }
+    }
+
+    if !current_line.is_empty() {
+        result.push(Line::from(current_line));
+    }
+
+    if result.is_empty() {
+        result.push(Line::default());
+    }
+
+    result
+}
+
 impl Widget for MessageView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
@@ -116,7 +204,8 @@ impl Widget for MessageView<'_> {
             return;
         }
 
-        let (start, end) = self.visible_range(area.height as usize);
+        let width = area.width as usize;
+        let (start, end) = self.visible_range(area.height as usize, width);
 
         let mut y = area.y;
         let mut prev_date: Option<&str> = None;
@@ -168,14 +257,14 @@ impl Widget for MessageView<'_> {
                 ""
             };
 
-            // Build the line
-            let mut spans = vec![
+            // Build the spans
+            let mut spans: Vec<Span<'_>> = vec![
                 Span::styled(format!("{time} "), self.theme.message_timestamp_style()),
                 Span::styled(
                     format!("{author_name}: "),
                     self.theme.message_author_style(),
                 ),
-                Span::styled(&msg.content, bg_style),
+                Span::styled(msg.content.clone(), bg_style),
             ];
 
             if !edited.is_empty() {
@@ -185,22 +274,28 @@ impl Widget for MessageView<'_> {
                 ));
             }
 
-            let line = Line::from(spans);
+            // Wrap spans across multiple lines
+            let wrapped_lines = wrap_spans(spans, width);
 
-            if is_selected {
-                // Highlight selected line
-                for x in area.left()..area.right() {
-                    buf[(x, y)].set_style(
-                        ratatui::style::Style::default().bg(self.theme.message_selected_bg),
-                    );
+            for wrapped_line in &wrapped_lines {
+                if y >= area.bottom() {
+                    break;
                 }
-            }
 
-            buf.set_line(area.x, y, &line, area.width);
+                if is_selected {
+                    for x in area.left()..area.right() {
+                        buf[(x, y)].set_style(
+                            ratatui::style::Style::default().bg(self.theme.message_selected_bg),
+                        );
+                    }
+                }
+
+                buf.set_line(area.x, y, wrapped_line, area.width);
+                y += 1;
+            }
 
             // Attachment indicators
             for att in &msg.attachments {
-                y += 1;
                 if y >= area.bottom() {
                     break;
                 }
@@ -209,9 +304,8 @@ impl Widget for MessageView<'_> {
                     self.theme.dim_style(),
                 ));
                 buf.set_line(area.x, y, &att_line, area.width);
+                y += 1;
             }
-
-            y += 1;
         }
     }
 }
@@ -377,7 +471,7 @@ mod tests {
         let cache = DiscordCache::default();
         let view = MessageView::new(&messages, &scroll, None, &theme, &cache);
 
-        let (start, end) = view.visible_range(10);
+        let (start, end) = view.visible_range(10, 80);
         assert_eq!(end, 20); // ends at the newest
                              // 9 messages + 1 date separator = 10 lines
         assert_eq!(start, 11);
@@ -400,7 +494,7 @@ mod tests {
         let cache = DiscordCache::default();
         let view = MessageView::new(&messages, &scroll, None, &theme, &cache);
 
-        let (start, end) = view.visible_range(10);
+        let (start, end) = view.visible_range(10, 80);
         assert_eq!(end, 15); // 20 - 5 = 15
                              // 9 messages + 1 date separator = 10 lines
         assert_eq!(start, 6);
@@ -448,12 +542,12 @@ mod tests {
         let view = MessageView::new(&messages, &scroll, None, &theme, &cache);
 
         // Total rendered lines: sep1 + msg1 + msg2 + sep2 + msg3 + msg4 = 6 lines
-        let (start, end) = view.visible_range(6);
+        let (start, end) = view.visible_range(6, 80);
         assert_eq!(start, 0);
         assert_eq!(end, 4);
 
         // With only 5 lines available, the top message gets clipped
-        let (start, end) = view.visible_range(5);
+        let (start, end) = view.visible_range(5, 80);
         assert_eq!(end, 4);
         // sep2 + msg3 + msg4 = 3 lines for date2, +sep1+msg2 = 5 lines
         // Walking: idx=3 (same date as 2) → 1 line, idx=2 (diff date from 1) → 2 lines,
@@ -489,12 +583,12 @@ mod tests {
         // msg1: date sep(1) + content(1) + 2 attachments(2) = 4 lines
         // msg2: same date → content(1) = 1 line
         // Total = 5 lines
-        let (start, end) = view.visible_range(5);
+        let (start, end) = view.visible_range(5, 80);
         assert_eq!(start, 0);
         assert_eq!(end, 2);
 
         // With only 2 lines: can fit msg2(1 line) + date sep for first rendered(1) = 2
-        let (start, end) = view.visible_range(2);
+        let (start, end) = view.visible_range(2, 80);
         assert_eq!(start, 1);
         assert_eq!(end, 2);
     }
@@ -510,6 +604,64 @@ mod tests {
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(1536), "1.5 KB");
         assert_eq!(format_size(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn wrap_spans_no_wrap_needed() {
+        let spans = vec![Span::raw("hello world")];
+        let lines = wrap_spans(spans, 80);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn wrap_spans_wraps_long_text() {
+        let spans = vec![Span::raw("abcdefghij")]; // 10 chars
+        let lines = wrap_spans(spans, 4);
+        assert_eq!(lines.len(), 3); // "abcd", "efgh", "ij"
+    }
+
+    #[test]
+    fn wrap_spans_preserves_styles_across_break() {
+        let style1 = ratatui::style::Style::default().fg(ratatui::style::Color::Red);
+        let style2 = ratatui::style::Style::default().fg(ratatui::style::Color::Blue);
+        let spans = vec![
+            Span::styled("aaa", style1),
+            Span::styled("bbb", style2),
+        ];
+        let lines = wrap_spans(spans, 4);
+        // "aaa" (3 wide, style1) + "b" (1 wide, style2) = 4 on line 1
+        // "bb" (2 wide, style2) on line 2
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn long_message_wraps_in_render() {
+        let long_content = "a".repeat(100);
+        let mut messages = VecDeque::new();
+        messages.push_back(make_msg(1, 100, &long_content, "2024-01-15T10:30:00Z"));
+
+        let scroll = ScrollState::Following;
+        let theme = Theme::default();
+        let cache = make_cache_with_user(100, "A");
+        let widget = MessageView::new(&messages, &scroll, None, &theme, &cache);
+
+        // Width 40 — "10:30 A: " prefix is ~9 chars, content is 100 chars
+        // Total ~109 chars → ceil(109/40) = 3 lines + 1 date separator = 4 lines
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        // The content 'a' should appear on multiple lines
+        let mut lines_with_a = 0;
+        for y in 0..20u16 {
+            let line: String = (0..40u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if line.contains('a') {
+                lines_with_a += 1;
+            }
+        }
+        assert!(lines_with_a >= 2, "Long message should wrap to multiple lines, got {lines_with_a}");
     }
 
     #[test]
