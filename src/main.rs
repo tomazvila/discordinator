@@ -17,7 +17,7 @@ use discordinator::infrastructure::gateway::GatewayManager;
 use discordinator::infrastructure::http_client::HttpActor;
 use discordinator::infrastructure::keyring::KeyringStore;
 use discordinator::input::mode::InputMode;
-use discordinator::ui::login::{LoginField, LoginMethod, LoginScreen, LoginState, LoginStatus};
+use discordinator::ui::login::{LoginMethod, LoginScreen, LoginState, LoginStatus};
 
 type Term = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
@@ -51,30 +51,29 @@ async fn run(terminal: &mut Term, config: AppConfig) -> Result<()> {
     let keyring = KeyringStore;
     let env_getter = |key: &str| -> Option<String> { std::env::var(key).ok() };
 
-    let mut token =
-        match discordinator::auth::retrieve_token(&config.auth, &keyring, &env_getter)? {
-            Some(t) => t,
-            None => match login_loop(terminal, &config, &keyring).await? {
-                Some(t) => SecretString::from(t),
-                None => return Ok(()),
-            },
-        };
+    let mut token = match discordinator::auth::retrieve_token(&config.auth, &keyring, &env_getter)?
+    {
+        Some(t) => t,
+        None => match login_loop(terminal, &config, &keyring).await? {
+            Some(t) => SecretString::from(t),
+            None => return Ok(()),
+        },
+    };
 
     loop {
         match run_app(terminal, config.clone(), token.clone()).await? {
             RunResult::Quit => return Ok(()),
-            RunResult::ReturnToLogin => {
-                match login_loop(terminal, &config, &keyring).await? {
-                    Some(t) => token = SecretString::from(t),
-                    None => return Ok(()),
-                }
-            }
+            RunResult::ReturnToLogin => match login_loop(terminal, &config, &keyring).await? {
+                Some(t) => token = SecretString::from(t),
+                None => return Ok(()),
+            },
         }
     }
 }
 
 // === Async Event Loop ===
 
+#[allow(clippy::too_many_lines)]
 async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) -> Result<RunResult> {
     let dirs = AppDirs::new()?;
 
@@ -111,8 +110,13 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     // Async terminal event stream
     let mut reader = crossterm::event::EventStream::new();
 
-    // Render tick
-    let mut render_interval = tokio::time::interval(Duration::from_millis(16));
+    // Render tick (from config, default 60fps = 16ms)
+    let render_ms = if app.state.config.general.render_fps > 0 {
+        1000 / u64::from(app.state.config.general.render_fps)
+    } else {
+        16
+    };
+    let mut render_interval = tokio::time::interval(Duration::from_millis(render_ms));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Periodic re-subscription for all open panes (prevents Discord from dropping
@@ -124,6 +128,13 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     let connect_deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(connect_deadline);
     let mut connected = false;
+
+    // Load session on startup if configured
+    if app.state.config.session.restore_on_start {
+        let _ = db_tx.try_send(DbRequest::LoadSession {
+            name: "default".to_string(),
+        });
+    }
 
     loop {
         tokio::select! {
@@ -142,6 +153,29 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
                 app.dirty |= discordinator::event_handler::handle_background_result(
                     result, &mut app.state,
                 );
+
+                // After session restore, fetch messages for all panes that have channels
+                if app.state.session_just_restored {
+                    app.state.session_just_restored = false;
+                    let pane_ids = app.state.pane_manager.root.leaves_in_order();
+                    for pid in pane_ids {
+                        if let Some(pane) = app.state.pane_manager.root.find(pid) {
+                            if let Some(ch_id) = pane.channel_id {
+                                let _ = db_tx.try_send(DbRequest::FetchMessages {
+                                    channel_id: ch_id,
+                                    before_timestamp: None,
+                                    limit: 50,
+                                });
+                                let _ = http_tx.try_send(HttpRequest::FetchMessages {
+                                    channel_id: ch_id,
+                                    before: None,
+                                    limit: 50,
+                                });
+                            }
+                        }
+                    }
+                    subscribe_all_panes(&app.state, &gw_cmd_tx);
+                }
             }
 
             maybe_event = reader.next() => {
@@ -183,6 +217,15 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
         }
 
         if app.should_quit {
+            // Save session before quitting
+            if app.state.config.session.auto_save {
+                if let Ok(json) = app.state.pane_manager.to_session_json() {
+                    let _ = db_tx.try_send(DbRequest::SaveSession {
+                        name: "default".to_string(),
+                        layout_json: json,
+                    });
+                }
+            }
             return Ok(RunResult::Quit);
         }
     }
@@ -427,11 +470,6 @@ async fn login_loop(
                 qr_lines = None;
             }
             KeyCode::F(2) => {
-                state.set_method(LoginMethod::EmailPassword);
-                qr_result_rx = None;
-                qr_lines = None;
-            }
-            KeyCode::F(3) => {
                 state.set_method(LoginMethod::QrCode);
                 if qr_result_rx.is_none() {
                     match start_qr_auth(config) {
@@ -497,64 +535,7 @@ async fn handle_login_submit(
             }
         }
 
-        LoginMethod::EmailPassword => {
-            if let LoginStatus::MfaRequired { ticket } = &state.status {
-                // MFA phase: submit TOTP code
-                let ticket = ticket.clone();
-                let mfa_code = state.mfa_input.clone();
-                state.status = LoginStatus::Validating;
-                terminal.draw(|f| f.render_widget(LoginScreen::new(state), f.area()))?;
-
-                match discordinator::auth::submit_mfa_totp(
-                    &ticket,
-                    &mfa_code,
-                    &config.discord,
-                    DISCORD_API_BASE,
-                )
-                .await
-                {
-                    Ok(token) => {
-                        discordinator::auth::store_token(keyring, &token)?;
-                        Ok(Some(token))
-                    }
-                    Err(e) => {
-                        state.status = LoginStatus::Error(format!("MFA failed: {e}"));
-                        Ok(None)
-                    }
-                }
-            } else {
-                // Initial login phase
-                let email = state.email_input.clone();
-                let password = state.password_input.clone();
-                state.status = LoginStatus::Validating;
-                terminal.draw(|f| f.render_widget(LoginScreen::new(state), f.area()))?;
-
-                match discordinator::auth::login_with_credentials(
-                    &email,
-                    &password,
-                    &config.discord,
-                    DISCORD_API_BASE,
-                )
-                .await
-                {
-                    Ok(discordinator::auth::LoginResponse::Token(token)) => {
-                        discordinator::auth::store_token(keyring, &token)?;
-                        Ok(Some(token))
-                    }
-                    Ok(discordinator::auth::LoginResponse::MfaRequired { ticket }) => {
-                        state.status = LoginStatus::MfaRequired { ticket };
-                        state.active_field = LoginField::MfaCode;
-                        Ok(None)
-                    }
-                    Err(e) => {
-                        state.status = LoginStatus::Error(format!("Login failed: {e}"));
-                        Ok(None)
-                    }
-                }
-            }
-        }
-
-        LoginMethod::QrCode => {
+        LoginMethod::EmailPassword | LoginMethod::QrCode => {
             // QR auth is handled asynchronously via background task
             Ok(None)
         }

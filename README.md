@@ -7,10 +7,10 @@ A Discord TUI (Terminal User Interface) client written in Rust with tmux-like sp
 ## Features
 
 - **tmux-style pane management** — Split your terminal into multiple independent channel views (horizontal/vertical), resize, zoom, and navigate between them
-- **Vim-style keybindings** — Modal editing with Normal, Insert, Command, and Pane Prefix modes
+- **Vim-style keybindings** — Modal editing with Normal, Insert, and Pane Prefix modes
 - **Full message support** — Send, edit, delete, and reply to messages with Discord-flavored markdown rendering
 - **Server/channel sidebar** — Toggleable tree view with guilds, categories, channels, and DMs
-- **Three login methods** — Paste a token, email + password (with 2FA), or scan a QR code
+- **Two login methods** — Paste a token directly, or scan a QR code with the Discord mobile app
 - **Local message history** — SQLite-backed persistence so channels load instantly on restart
 - **Session persistence** — Pane layouts are saved and restored across sessions
 - **Anti-detection** — Mimics the official Discord web client's connection fingerprint to reduce ban risk
@@ -44,11 +44,10 @@ cargo build
 cargo run
 ```
 
-On first launch, you'll see a login screen with three authentication options:
+On first launch, you'll see a login screen with two authentication options:
 
-1. **Paste token** — If you already have your Discord token, paste it directly
-2. **Email + password** — Enter your credentials (supports 2FA)
-3. **QR code** — Scan with the Discord mobile app
+1. **Paste token** (F1) — If you already have your Discord token, paste it directly
+2. **QR code** (F2) — Scan with the Discord mobile app
 
 After successful authentication, your token is stored securely in the OS keyring.
 
@@ -76,7 +75,6 @@ Discordinator uses vim-style modal input:
 |------|-----------|---------|
 | **Normal** | `Esc` | Navigate messages, select items |
 | **Insert** | `i` | Compose and send messages |
-| **Command** | `:` | Execute commands |
 | **Pane Prefix** | `Ctrl+b` | Pane management (next key is the pane action) |
 
 ### Navigation (Normal Mode)
@@ -84,12 +82,13 @@ Discordinator uses vim-style modal input:
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Scroll messages down / up |
+| `J` / `K` | Select message down / up |
 | `g` / `G` | Jump to top / bottom of messages |
 | `Ctrl+u` / `Ctrl+d` | Half-page scroll up / down |
 | `i` | Enter Insert mode |
 | `r` | Reply to selected message |
 | `e` | Edit selected message (own only) |
-| `d` | Delete selected message (own only, with confirmation) |
+| `d` | Delete selected message (own only, with `y` to confirm) |
 
 ### Message Composition (Insert Mode)
 
@@ -118,7 +117,6 @@ Press `Ctrl+b` first, then the action key:
 | Key | Action |
 |-----|--------|
 | `Ctrl+q` | Quit |
-| `Tab` / `Shift+Tab` | Cycle focus between sidebar, messages, and input |
 
 ## Configuration
 
@@ -127,7 +125,6 @@ Configuration lives at `~/.config/discordinator/config.toml`. A default is creat
 ```toml
 [general]
 timestamp_format = "%H:%M"
-show_typing_indicator = true
 render_fps = 60
 
 [auth]
@@ -140,13 +137,10 @@ client_build_number = 346892
 browser_version = "131.0.0.0"
 
 [appearance]
-theme = "default"
 show_sidebar = true
 sidebar_width = 24
 
 [pane]
-prefix_key = "Ctrl+b"
-border_style = "rounded"
 active_border_color = "cyan"
 inactive_border_color = "gray"
 
@@ -162,7 +156,6 @@ restore_on_start = true
 | Config | `~/.config/discordinator/config.toml` |
 | Database | `~/.local/share/discordinator/messages.db` |
 | Logs | `~/.local/share/discordinator/logs/` |
-| Cache | `~/.cache/discordinator/` |
 
 ## Design Decisions
 
@@ -231,7 +224,6 @@ All commands must be run inside `nix develop`. The Nix flake provides the Rust t
 |----------|-------------|
 | `DISCORD_TOKEN` | Discord user token (highest priority auth source) |
 | `RUST_LOG` | Log level filter (`error`, `warn`, `info`, `debug`, `trace`) |
-| `DISCORDINATOR_CONFIG` | Custom config file path (overrides XDG default) |
 
 ## License
 

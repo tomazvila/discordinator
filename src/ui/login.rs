@@ -66,7 +66,7 @@ impl LoginState {
         self.method = method;
         self.active_field = match method {
             LoginMethod::EmailPassword => LoginField::Email,
-            LoginMethod::Token | LoginMethod::QrCode => LoginField::Token, // QR has no input fields
+            LoginMethod::Token | LoginMethod::QrCode => LoginField::Token,
         };
         self.status = LoginStatus::Idle;
     }
@@ -74,8 +74,7 @@ impl LoginState {
     /// Cycle to the next login method.
     pub fn next_method(&mut self) {
         let next = match self.method {
-            LoginMethod::Token => LoginMethod::EmailPassword,
-            LoginMethod::EmailPassword => LoginMethod::QrCode,
+            LoginMethod::Token | LoginMethod::EmailPassword => LoginMethod::QrCode,
             LoginMethod::QrCode => LoginMethod::Token,
         };
         self.set_method(next);
@@ -84,25 +83,15 @@ impl LoginState {
     /// Cycle to the previous login method.
     pub fn prev_method(&mut self) {
         let prev = match self.method {
-            LoginMethod::Token => LoginMethod::QrCode,
-            LoginMethod::EmailPassword => LoginMethod::Token,
-            LoginMethod::QrCode => LoginMethod::EmailPassword,
+            LoginMethod::Token | LoginMethod::EmailPassword => LoginMethod::QrCode,
+            LoginMethod::QrCode => LoginMethod::Token,
         };
         self.set_method(prev);
     }
 
     /// Move focus to the next input field (within current method).
     pub fn next_field(&mut self) {
-        self.active_field = match (&self.method, &self.active_field, &self.status) {
-            (LoginMethod::EmailPassword, LoginField::Email, _) => LoginField::Password,
-            (LoginMethod::EmailPassword, LoginField::Password, LoginStatus::MfaRequired { .. }) => {
-                LoginField::MfaCode
-            }
-            (LoginMethod::EmailPassword, LoginField::MfaCode | LoginField::Password, _) => {
-                LoginField::Email
-            }
-            _ => self.active_field,
-        };
+        // Token and QR methods only have a single input field each, nothing to cycle.
     }
 
     /// Get a reference to the currently active input string.
@@ -156,12 +145,6 @@ impl LoginState {
         match (&self.method, &self.status) {
             (LoginMethod::Token, LoginStatus::Idle | LoginStatus::Error(_)) => {
                 !self.token_input.is_empty()
-            }
-            (LoginMethod::EmailPassword, LoginStatus::Idle | LoginStatus::Error(_)) => {
-                !self.email_input.is_empty() && !self.password_input.is_empty()
-            }
-            (LoginMethod::EmailPassword, LoginStatus::MfaRequired { .. }) => {
-                !self.mfa_input.is_empty()
             }
             _ => false,
         }
@@ -220,8 +203,9 @@ impl Widget for LoginScreen<'_> {
 
         // Render form content
         match self.state.method {
-            LoginMethod::Token => self.render_token_form(chunks[1], buf),
-            LoginMethod::EmailPassword => self.render_email_form(chunks[1], buf),
+            LoginMethod::Token | LoginMethod::EmailPassword => {
+                self.render_token_form(chunks[1], buf);
+            }
             LoginMethod::QrCode => self.render_qr_code(chunks[1], buf),
         }
 
@@ -234,8 +218,7 @@ impl LoginScreen<'_> {
     fn render_tabs(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let tabs = [
             ("F1: Token", LoginMethod::Token),
-            ("F2: Email/Pass", LoginMethod::EmailPassword),
-            ("F3: QR Code", LoginMethod::QrCode),
+            ("F2: QR Code", LoginMethod::QrCode),
         ];
 
         let spans: Vec<Span> = tabs
@@ -287,95 +270,6 @@ impl LoginScreen<'_> {
         input.render(chunks[1], buf);
     }
 
-    fn render_email_form(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
-        let show_mfa = matches!(self.state.status, LoginStatus::MfaRequired { .. });
-
-        let constraints = if show_mfa {
-            vec![
-                Constraint::Length(1), // Email label
-                Constraint::Length(3), // Email input
-                Constraint::Length(1), // Password label
-                Constraint::Length(3), // Password input
-                Constraint::Length(1), // MFA label
-                Constraint::Length(3), // MFA input
-                Constraint::Min(0),    // Spacer
-            ]
-        } else {
-            vec![
-                Constraint::Length(1), // Email label
-                Constraint::Length(3), // Email input
-                Constraint::Length(1), // Password label
-                Constraint::Length(3), // Password input
-                Constraint::Min(0),    // Spacer
-            ]
-        };
-
-        let chunks = Layout::vertical(constraints).split(area);
-
-        // Email
-        let label = Paragraph::new("Email:").style(Style::default().fg(Color::White));
-        label.render(chunks[0], buf);
-
-        let email_style = if self.state.active_field == LoginField::Email {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let email_input = Paragraph::new(self.state.email_input.as_str())
-            .style(email_style)
-            .block(Block::default().borders(Borders::ALL).border_style(
-                if self.state.active_field == LoginField::Email {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                },
-            ));
-        email_input.render(chunks[1], buf);
-
-        // Password
-        let label = Paragraph::new("Password:").style(Style::default().fg(Color::White));
-        label.render(chunks[2], buf);
-
-        let pass_display = self.state.masked_display(LoginField::Password);
-        let pass_style = if self.state.active_field == LoginField::Password {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let pass_input = Paragraph::new(pass_display).style(pass_style).block(
-            Block::default().borders(Borders::ALL).border_style(
-                if self.state.active_field == LoginField::Password {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                },
-            ),
-        );
-        pass_input.render(chunks[3], buf);
-
-        // MFA field (only if needed)
-        if show_mfa {
-            let label = Paragraph::new("2FA Code:").style(Style::default().fg(Color::Yellow));
-            label.render(chunks[4], buf);
-
-            let mfa_style = if self.state.active_field == LoginField::MfaCode {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let mfa_input = Paragraph::new(self.state.mfa_input.as_str())
-                .style(mfa_style)
-                .block(Block::default().borders(Borders::ALL).border_style(
-                    if self.state.active_field == LoginField::MfaCode {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ));
-            mfa_input.render(chunks[5], buf);
-        }
-    }
-
     fn render_qr_code(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         if let Some(qr_lines) = self.qr_lines {
             let lines: Vec<Line> = qr_lines.iter().map(|l| Line::raw(l.as_str())).collect();
@@ -392,7 +286,7 @@ impl LoginScreen<'_> {
     fn render_status(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let (text, style) = match &self.state.status {
             LoginStatus::Idle => (
-                "Enter to submit | Tab to switch fields | F1/F2/F3 to switch method",
+                "Enter to submit | F1: Token | F2: QR Code | Esc to quit",
                 Style::default().fg(Color::DarkGray),
             ),
             LoginStatus::Validating => ("Validating...", Style::default().fg(Color::Yellow)),
@@ -464,9 +358,6 @@ mod tests {
         assert_eq!(state.method, LoginMethod::Token);
 
         state.next_method();
-        assert_eq!(state.method, LoginMethod::EmailPassword);
-
-        state.next_method();
         assert_eq!(state.method, LoginMethod::QrCode);
 
         state.next_method();
@@ -480,39 +371,16 @@ mod tests {
         assert_eq!(state.method, LoginMethod::QrCode);
 
         state.prev_method();
-        assert_eq!(state.method, LoginMethod::EmailPassword);
-
-        state.prev_method();
         assert_eq!(state.method, LoginMethod::Token);
     }
 
     #[test]
-    fn login_state_next_field_email_password() {
+    fn login_state_next_field_token() {
         let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
-        assert_eq!(state.active_field, LoginField::Email);
+        assert_eq!(state.active_field, LoginField::Token);
 
-        state.next_field();
-        assert_eq!(state.active_field, LoginField::Password);
-
-        state.next_field(); // Wraps back to email (no MFA)
-        assert_eq!(state.active_field, LoginField::Email);
-    }
-
-    #[test]
-    fn login_state_next_field_with_mfa() {
-        let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
-        state.status = LoginStatus::MfaRequired {
-            ticket: "ticket".to_string(),
-        };
-        state.active_field = LoginField::Password;
-
-        state.next_field();
-        assert_eq!(state.active_field, LoginField::MfaCode);
-
-        state.next_field();
-        assert_eq!(state.active_field, LoginField::Email);
+        state.next_field(); // Token method has single field, stays the same
+        assert_eq!(state.active_field, LoginField::Token);
     }
 
     #[test]
@@ -597,29 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn login_state_can_submit_email_password() {
+    fn login_state_can_submit_qr_returns_false() {
         let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
-        assert!(!state.can_submit()); // Both empty
-
-        state.email_input = "user@test.com".to_string();
-        assert!(!state.can_submit()); // Password empty
-
-        state.password_input = "pass".to_string();
-        assert!(state.can_submit()); // Both filled
-    }
-
-    #[test]
-    fn login_state_can_submit_mfa() {
-        let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
-        state.status = LoginStatus::MfaRequired {
-            ticket: "ticket".to_string(),
-        };
-        assert!(!state.can_submit()); // MFA code empty
-
-        state.mfa_input = "123456".to_string();
-        assert!(state.can_submit());
+        state.set_method(LoginMethod::QrCode);
+        assert!(!state.can_submit()); // QR auth is async, no submit
     }
 
     #[test]
@@ -693,8 +542,7 @@ mod tests {
         let state = LoginState::default();
         let output = render_login_screen(&state, 60, 20);
         assert!(output.contains("F1: Token"), "Should show token tab");
-        assert!(output.contains("F2: Email/Pass"), "Should show email tab");
-        assert!(output.contains("F3: QR Code"), "Should show QR tab");
+        assert!(output.contains("F2: QR Code"), "Should show QR tab");
     }
 
     #[test]
@@ -709,18 +557,13 @@ mod tests {
     }
 
     #[test]
-    fn login_screen_renders_email_form() {
+    fn login_screen_renders_qr_form() {
         let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
+        state.set_method(LoginMethod::QrCode);
         let output = render_login_screen(&state, 60, 20);
         assert!(
-            output.contains("Email"),
-            "Should show email label: {}",
-            output
-        );
-        assert!(
-            output.contains("Password"),
-            "Should show password label: {}",
+            output.contains("Generating QR code"),
+            "Should show QR placeholder: {}",
             output
         );
     }
@@ -803,16 +646,12 @@ mod tests {
     }
 
     #[test]
-    fn login_screen_renders_mfa_form() {
-        let mut state = LoginState::default();
-        state.set_method(LoginMethod::EmailPassword);
-        state.status = LoginStatus::MfaRequired {
-            ticket: "ticket123".to_string(),
-        };
+    fn login_screen_renders_token_form_content() {
+        let state = LoginState::default();
         let output = render_login_screen(&state, 60, 20);
         assert!(
-            output.contains("2FA Code"),
-            "Should show 2FA code field: {}",
+            output.contains("Paste your Discord token"),
+            "Should show token prompt: {}",
             output
         );
     }

@@ -29,13 +29,21 @@ fn handle_normal_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
     match key.code {
         // Mode transitions
         KeyCode::Char('i') => (Some(Action::EnterInsertMode), InputMode::Insert),
-        KeyCode::Char(':') => (Some(Action::EnterCommandMode), InputMode::Command),
 
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => (Some(Action::ScrollDown(1)), InputMode::Normal),
         KeyCode::Char('k') | KeyCode::Up => (Some(Action::ScrollUp(1)), InputMode::Normal),
         KeyCode::Char('g') => (Some(Action::ScrollToTop), InputMode::Normal),
         KeyCode::Char('G') => (Some(Action::ScrollToBottom), InputMode::Normal),
+
+        // Message selection & interaction
+        KeyCode::Char('J') => (Some(Action::SelectMessageDown), InputMode::Normal),
+        KeyCode::Char('K') => (Some(Action::SelectMessageUp), InputMode::Normal),
+        KeyCode::Char('r') => (Some(Action::StartReply), InputMode::Normal),
+        KeyCode::Char('e') => (Some(Action::StartEdit), InputMode::Normal),
+        KeyCode::Char('d') => (Some(Action::StartDelete), InputMode::Normal),
+        KeyCode::Char('y') => (Some(Action::ConfirmDelete), InputMode::Normal),
+        KeyCode::Char('n') | KeyCode::Esc => (Some(Action::CancelDelete), InputMode::Normal),
 
         _ => (None, InputMode::Normal),
     }
@@ -110,10 +118,45 @@ mod tests {
     }
 
     #[test]
-    fn normal_colon_enters_command_mode() {
-        let (action, mode) = handle_key_event(key(KeyCode::Char(':')), InputMode::Normal);
-        assert_eq!(action, Some(Action::EnterCommandMode));
-        assert_eq!(mode, InputMode::Command);
+    fn normal_r_starts_reply() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('r')), InputMode::Normal);
+        assert_eq!(action, Some(Action::StartReply));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn normal_e_starts_edit() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('e')), InputMode::Normal);
+        assert_eq!(action, Some(Action::StartEdit));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn normal_d_starts_delete() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('d')), InputMode::Normal);
+        assert_eq!(action, Some(Action::StartDelete));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn normal_y_confirms_delete() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('y')), InputMode::Normal);
+        assert_eq!(action, Some(Action::ConfirmDelete));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn normal_shift_j_selects_message_down() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('J')), InputMode::Normal);
+        assert_eq!(action, Some(Action::SelectMessageDown));
+        assert_eq!(mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn normal_shift_k_selects_message_up() {
+        let (action, mode) = handle_key_event(key(KeyCode::Char('K')), InputMode::Normal);
+        assert_eq!(action, Some(Action::SelectMessageUp));
+        assert_eq!(mode, InputMode::Normal);
     }
 
     #[test]

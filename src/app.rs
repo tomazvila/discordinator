@@ -54,6 +54,9 @@ pub struct AppState {
 
     // Current user (set after login/gateway READY)
     pub current_user_id: Option<Id<UserMarker>>,
+
+    // Session restore: set to true when a session is loaded so main loop can fetch messages
+    pub session_just_restored: bool,
 }
 
 impl AppState {
@@ -78,6 +81,7 @@ impl AppState {
             status_message: None,
             status_error: None,
             current_user_id: None,
+            session_just_restored: false,
         }
     }
 

@@ -262,11 +262,22 @@ pub fn handle_background_result(result: BackgroundResult, state: &mut AppState) 
             true
         }
         BackgroundResult::SessionLoaded { layout_json, .. } => {
-            if layout_json.is_some() {
-                // TODO: restore pane layout from JSON
-                tracing::info!("Session loaded (layout restore not yet implemented)");
+            if let Some(json) = layout_json {
+                if let Some(restored) = crate::domain::pane::PaneManager::from_session_json(&json) {
+                    tracing::info!(
+                        "Session restored with {} panes",
+                        restored.root.leaves_in_order().len()
+                    );
+                    state.pane_manager = restored;
+                    state.session_just_restored = true;
+                    true
+                } else {
+                    tracing::warn!("Failed to parse saved session layout");
+                    false
+                }
+            } else {
+                false
             }
-            false
         }
         BackgroundResult::DbError { operation, error } => {
             tracing::error!("DB error in {}: {}", operation, error);
