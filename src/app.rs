@@ -15,6 +15,7 @@ use crate::domain::types::{Action, ConnectionState, GuildMarker, Id, ScrollState
 use crate::input::handler::handle_key_event;
 use crate::input::mode::InputMode;
 use crate::ui::theme::Theme;
+use crate::ui::widgets::server_tree;
 
 /// Sidebar UI state.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +39,7 @@ pub struct AppState {
     pub pane_manager: PaneManager,
     pub sidebar: SidebarState,
     pub sidebar_visible: bool,
+    pub sidebar_focused: bool,
 
     // Input
     pub input_mode: InputMode,
@@ -69,6 +71,7 @@ impl AppState {
             pane_manager: PaneManager::new(),
             sidebar: SidebarState::default(),
             sidebar_visible,
+            sidebar_focused: false,
             input_mode: InputMode::Normal,
             config,
             theme,
@@ -129,6 +132,7 @@ impl App {
     }
 
     /// Handle a terminal key event. Returns true if state was modified.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_terminal_event(&mut self, key: KeyEvent) -> bool {
         // In insert mode, handle typing keys directly
         if self.state.input_mode == InputMode::Insert {
@@ -196,6 +200,40 @@ impl App {
             }
         }
 
+        // Sidebar focused: intercept navigation keys before general handler
+        if self.state.sidebar_focused && self.state.input_mode == InputMode::Normal {
+            // Pass through global bindings
+            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                match key.code {
+                    KeyCode::Char('q') => {
+                        self.should_quit = true;
+                        return apply_action(Action::Quit, &mut self.state);
+                    }
+                    KeyCode::Char('b') => {
+                        self.state.input_mode = InputMode::PanePrefix;
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+
+            let action = match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::SidebarNavigateDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::SidebarNavigateUp),
+                KeyCode::Enter | KeyCode::Char('l') => Some(Action::SidebarSelect),
+                KeyCode::Char('h') => Some(Action::SidebarCollapse),
+                KeyCode::Char(' ') => Some(Action::SidebarToggleCollapse),
+                KeyCode::Esc | KeyCode::Tab => Some(Action::FocusPaneArea),
+                _ => None,
+            };
+
+            return if let Some(action) = action {
+                apply_action(action, &mut self.state)
+            } else {
+                false
+            };
+        }
+
         // For non-insert modes, use the key handler
         let (action, new_mode) = handle_key_event(key, self.state.input_mode);
 
@@ -248,6 +286,11 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         Action::SwitchChannel(channel_id) => {
             let guild_id = state.cache.channel_guild.get(&channel_id).copied();
             state.pane_manager.assign_channel(channel_id, guild_id);
+            // Sync sidebar selection to match
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            if let Some(idx) = server_tree::find_channel_index(&items, channel_id) {
+                state.sidebar.selected_index = idx;
+            }
             true
         }
 
@@ -304,11 +347,77 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         // UI toggles
         Action::ToggleSidebar => {
             state.sidebar_visible = !state.sidebar_visible;
+            if !state.sidebar_visible {
+                state.sidebar_focused = false;
+            }
             true
         }
 
         Action::ToggleCommandPalette => {
             // Will be implemented in Phase 3
+            true
+        }
+
+        // Sidebar navigation
+        Action::SidebarNavigateUp => {
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            server_tree::navigate_up(&mut state.sidebar, items.len());
+            true
+        }
+        Action::SidebarNavigateDown => {
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            server_tree::navigate_down(&mut state.sidebar, items.len());
+            true
+        }
+        Action::SidebarSelect => {
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            if let Some(item) = items.get(state.sidebar.selected_index) {
+                match item {
+                    server_tree::TreeItem::Guild { .. } => {
+                        server_tree::toggle_collapse(&mut state.sidebar, &items);
+                    }
+                    server_tree::TreeItem::Channel { id, .. }
+                    | server_tree::TreeItem::DmChannel { id, .. } => {
+                        let channel_id = *id;
+                        let guild_id = state.cache.channel_guild.get(&channel_id).copied();
+                        state.pane_manager.assign_channel(channel_id, guild_id);
+                        state.sidebar_focused = false;
+                    }
+                    server_tree::TreeItem::DmHeader => {}
+                }
+            }
+            true
+        }
+        Action::SidebarCollapse => {
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            if let Some(parent_idx) = server_tree::find_parent_guild_index(&items, state.sidebar.selected_index) {
+                if let Some(server_tree::TreeItem::Guild { id, .. }) = items.get(parent_idx) {
+                    state.sidebar.collapsed_guilds.insert(*id);
+                    state.sidebar.selected_index = parent_idx;
+                }
+            }
+            true
+        }
+        Action::SidebarToggleCollapse => {
+            let items = server_tree::build_tree(&state.cache, &state.sidebar);
+            server_tree::toggle_collapse(&mut state.sidebar, &items);
+            true
+        }
+        Action::FocusSidebar => {
+            // Triple toggle: hidden→show+focus, visible+unfocused→focus, focused→hide+unfocus
+            if state.sidebar_focused {
+                state.sidebar_visible = false;
+                state.sidebar_focused = false;
+            } else if state.sidebar_visible {
+                state.sidebar_focused = true;
+            } else {
+                state.sidebar_visible = true;
+                state.sidebar_focused = true;
+            }
+            true
+        }
+        Action::FocusPaneArea => {
+            state.sidebar_focused = false;
             true
         }
 
@@ -874,6 +983,241 @@ mod tests {
         let pane = state.pane_manager.focused_pane().unwrap();
         assert_eq!(pane.channel_id, Some(channel_id));
         assert_eq!(pane.guild_id, Some(guild_id));
+    }
+
+    // --- Sidebar focus tests ---
+
+    fn state_with_guild_and_channels() -> AppState {
+        let mut state = test_state();
+        let guild_id = Id::new(1);
+        let ch_id = Id::new(11);
+
+        state.cache.guilds.insert(
+            guild_id,
+            crate::domain::types::CachedGuild {
+                id: guild_id,
+                name: "Test Server".to_string(),
+                icon: None,
+                channel_order: vec![ch_id],
+                roles: std::collections::HashMap::new(),
+            },
+        );
+        state.cache.channels.insert(
+            ch_id,
+            CachedChannel {
+                id: ch_id,
+                guild_id: Some(guild_id),
+                name: "general".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        state.cache.guild_order.push(guild_id);
+        state.cache.channel_guild.insert(ch_id, guild_id);
+        state.sidebar_visible = true;
+        state
+    }
+
+    #[test]
+    fn focus_sidebar_triple_toggle() {
+        let mut state = test_state();
+        state.sidebar_visible = false;
+        state.sidebar_focused = false;
+
+        // hidden → show + focus
+        apply_action(Action::FocusSidebar, &mut state);
+        assert!(state.sidebar_visible);
+        assert!(state.sidebar_focused);
+
+        // focused → hide + unfocus
+        apply_action(Action::FocusSidebar, &mut state);
+        assert!(!state.sidebar_visible);
+        assert!(!state.sidebar_focused);
+
+        // hidden → show + focus again
+        apply_action(Action::FocusSidebar, &mut state);
+        assert!(state.sidebar_visible);
+        assert!(state.sidebar_focused);
+
+        // unfocus first, then focus again (visible + unfocused → focus)
+        apply_action(Action::FocusPaneArea, &mut state);
+        assert!(state.sidebar_visible);
+        assert!(!state.sidebar_focused);
+
+        apply_action(Action::FocusSidebar, &mut state);
+        assert!(state.sidebar_visible);
+        assert!(state.sidebar_focused);
+    }
+
+    #[test]
+    fn focus_pane_area_unfocuses_sidebar() {
+        let mut state = test_state();
+        state.sidebar_focused = true;
+        apply_action(Action::FocusPaneArea, &mut state);
+        assert!(!state.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_navigate_up_down() {
+        let mut state = state_with_guild_and_channels();
+        assert_eq!(state.sidebar.selected_index, 0);
+
+        apply_action(Action::SidebarNavigateDown, &mut state);
+        assert_eq!(state.sidebar.selected_index, 1);
+
+        apply_action(Action::SidebarNavigateUp, &mut state);
+        assert_eq!(state.sidebar.selected_index, 0);
+    }
+
+    #[test]
+    fn sidebar_select_guild_toggles_collapse() {
+        let mut state = state_with_guild_and_channels();
+        state.sidebar.selected_index = 0; // guild
+
+        apply_action(Action::SidebarSelect, &mut state);
+        assert!(state.sidebar.collapsed_guilds.contains(&Id::new(1)));
+
+        apply_action(Action::SidebarSelect, &mut state);
+        assert!(!state.sidebar.collapsed_guilds.contains(&Id::new(1)));
+    }
+
+    #[test]
+    fn sidebar_select_channel_assigns_and_unfocuses() {
+        let mut state = state_with_guild_and_channels();
+        state.sidebar_focused = true;
+        state.sidebar.selected_index = 1; // channel
+
+        apply_action(Action::SidebarSelect, &mut state);
+        assert_eq!(state.focused_pane().channel_id, Some(Id::new(11)));
+        assert!(!state.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_collapse_from_channel_jumps_to_guild() {
+        let mut state = state_with_guild_and_channels();
+        state.sidebar.selected_index = 1; // channel
+
+        apply_action(Action::SidebarCollapse, &mut state);
+        assert_eq!(state.sidebar.selected_index, 0); // jumped to guild
+        assert!(state.sidebar.collapsed_guilds.contains(&Id::new(1)));
+    }
+
+    #[test]
+    fn toggle_sidebar_clears_focus() {
+        let mut state = test_state();
+        state.sidebar_visible = true;
+        state.sidebar_focused = true;
+
+        apply_action(Action::ToggleSidebar, &mut state);
+        assert!(!state.sidebar_visible);
+        assert!(!state.sidebar_focused);
+    }
+
+    #[test]
+    fn switch_channel_syncs_sidebar_selection() {
+        let mut state = state_with_guild_and_channels();
+        apply_action(Action::SwitchChannel(Id::new(11)), &mut state);
+        assert_eq!(state.sidebar.selected_index, 1);
+    }
+
+    // --- Sidebar key routing tests ---
+
+    #[test]
+    fn sidebar_focused_j_navigates_down() {
+        let mut app = test_app();
+        let mut s = state_with_guild_and_channels();
+        s.sidebar_focused = true;
+        app.state = s;
+
+        app.handle_terminal_event(key(KeyCode::Char('j')));
+        assert_eq!(app.state.sidebar.selected_index, 1);
+    }
+
+    #[test]
+    fn sidebar_focused_k_navigates_up() {
+        let mut app = test_app();
+        let mut s = state_with_guild_and_channels();
+        s.sidebar_focused = true;
+        s.sidebar.selected_index = 1;
+        app.state = s;
+
+        app.handle_terminal_event(key(KeyCode::Char('k')));
+        assert_eq!(app.state.sidebar.selected_index, 0);
+    }
+
+    #[test]
+    fn sidebar_focused_esc_returns_to_pane() {
+        let mut app = test_app();
+        app.state.sidebar_focused = true;
+
+        app.handle_terminal_event(key(KeyCode::Esc));
+        assert!(!app.state.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_tab_returns_to_pane() {
+        let mut app = test_app();
+        app.state.sidebar_focused = true;
+
+        app.handle_terminal_event(key(KeyCode::Tab));
+        assert!(!app.state.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_ctrl_q_still_quits() {
+        let mut app = test_app();
+        app.state.sidebar_focused = true;
+
+        app.handle_terminal_event(ctrl_key('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn sidebar_focused_ctrl_b_enters_pane_prefix() {
+        let mut app = test_app();
+        app.state.sidebar_focused = true;
+
+        app.handle_terminal_event(ctrl_key('b'));
+        assert_eq!(app.state.input_mode, InputMode::PanePrefix);
+    }
+
+    #[test]
+    fn sidebar_focused_enter_selects_channel() {
+        let mut app = test_app();
+        let mut s = state_with_guild_and_channels();
+        s.sidebar_focused = true;
+        s.sidebar.selected_index = 1; // channel
+        app.state = s;
+
+        app.handle_terminal_event(key(KeyCode::Enter));
+        assert_eq!(app.state.focused_pane().channel_id, Some(Id::new(11)));
+        assert!(!app.state.sidebar_focused);
+    }
+
+    #[test]
+    fn sidebar_focused_space_toggles_collapse() {
+        let mut app = test_app();
+        let mut s = state_with_guild_and_channels();
+        s.sidebar_focused = true;
+        s.sidebar.selected_index = 0; // guild
+        app.state = s;
+
+        app.handle_terminal_event(key(KeyCode::Char(' ')));
+        assert!(app.state.sidebar.collapsed_guilds.contains(&Id::new(1)));
+    }
+
+    #[test]
+    fn sidebar_not_focused_j_scrolls_normally() {
+        let mut app = test_app();
+        app.state.sidebar_focused = false;
+
+        // j should scroll the pane, not the sidebar
+        app.handle_terminal_event(key(KeyCode::Char('j')));
+        // If sidebar were focused, selected_index would change.
+        // Since it's not, pane scroll should change instead.
+        assert_eq!(app.state.sidebar.selected_index, 0);
     }
 
     #[test]

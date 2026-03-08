@@ -143,8 +143,18 @@ impl Widget for ServerTree<'_> {
             }
         }
 
-        for (i, item) in self.items.iter().enumerate() {
-            let y = area.y + i as u16;
+        // Auto-scroll: compute scroll offset so selected_index stays visible
+        let visible_rows = area.height as usize;
+        let scroll_offset = if visible_rows == 0 {
+            0
+        } else if self.selected_index >= visible_rows {
+            self.selected_index - visible_rows + 1
+        } else {
+            0
+        };
+
+        for (i, item) in self.items.iter().enumerate().skip(scroll_offset) {
+            let y = area.y + (i - scroll_offset) as u16;
             if y >= area.bottom() {
                 break;
             }
@@ -225,6 +235,25 @@ impl Widget for ServerTree<'_> {
                 }
             }
         }
+    }
+}
+
+/// Find the tree index of a channel by its ID.
+pub fn find_channel_index(items: &[TreeItem], channel_id: Id<ChannelMarker>) -> Option<usize> {
+    items.iter().position(|item| match item {
+        TreeItem::Channel { id, .. } | TreeItem::DmChannel { id, .. } => *id == channel_id,
+        _ => false,
+    })
+}
+
+/// Find the parent guild index for the item at the given index.
+pub fn find_parent_guild_index(items: &[TreeItem], index: usize) -> Option<usize> {
+    match items.get(index)? {
+        TreeItem::Guild { .. } => Some(index),
+        TreeItem::Channel { guild_id, .. } => items.iter().position(|item| {
+            matches!(item, TreeItem::Guild { id, .. } if *id == *guild_id)
+        }),
+        _ => None,
     }
 }
 
@@ -489,6 +518,73 @@ mod tests {
             .map(|x| buf[(x, 2u16)].symbol().to_string())
             .collect::<String>();
         assert!(line2.contains("general"), "line2 was: {}", line2);
+    }
+
+    #[test]
+    fn find_channel_index_finds_channel() {
+        let (cache, sidebar) = setup_cache();
+        let items = build_tree(&cache, &sidebar);
+
+        assert_eq!(find_channel_index(&items, Id::new(11)), Some(2)); // general
+        assert_eq!(find_channel_index(&items, Id::new(12)), Some(3)); // random
+        assert_eq!(find_channel_index(&items, Id::new(999)), None); // not found
+    }
+
+    #[test]
+    fn find_channel_index_finds_dm() {
+        let mut cache = DiscordCache::default();
+        let dm_id = Id::new(100);
+        cache.dm_channels.push(dm_id);
+        cache.channels.insert(
+            dm_id,
+            CachedChannel {
+                id: dm_id,
+                guild_id: None,
+                name: "friend".to_string(),
+                kind: twilight_model::channel::ChannelType::Private,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        let sidebar = SidebarState::default();
+        let items = build_tree(&cache, &sidebar);
+
+        assert_eq!(find_channel_index(&items, dm_id), Some(1));
+    }
+
+    #[test]
+    fn find_parent_guild_index_from_channel() {
+        let (cache, sidebar) = setup_cache();
+        let items = build_tree(&cache, &sidebar);
+
+        // Channel at index 2 (general) -> parent guild at index 0
+        assert_eq!(find_parent_guild_index(&items, 2), Some(0));
+        // Guild at index 0 -> itself
+        assert_eq!(find_parent_guild_index(&items, 0), Some(0));
+        // DM items have no parent guild
+        assert_eq!(find_parent_guild_index(&items, 99), None);
+    }
+
+    #[test]
+    fn render_tree_scrolls_when_selection_past_area() {
+        let (cache, mut sidebar) = setup_cache();
+        // Select item 3 (random) but area only fits 2 rows
+        sidebar.selected_index = 3;
+        let items = build_tree(&cache, &sidebar);
+        let theme = Theme::default();
+        let widget = ServerTree::from_parts(items, 3, &theme, None);
+
+        let area = Rect::new(0, 0, 30, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        // With 2 visible rows and selected_index=3, scroll_offset=2
+        // So row 0 shows items[2]="general", row 1 shows items[3]="random"
+        let line1: String = (0..30)
+            .map(|x| buf[(x, 1u16)].symbol().to_string())
+            .collect::<String>();
+        assert!(line1.contains("random"), "line1 was: {}", line1);
     }
 
     #[test]

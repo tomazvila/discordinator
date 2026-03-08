@@ -39,7 +39,7 @@
 | `src/ui/widgets/mod.rs` | 4 | UI | Module declaration |
 | `src/ui/widgets/input_box.rs` | 569 | UI | Message input widget, Unicode cursor management |
 | `src/ui/widgets/message_view.rs` | 556 | UI | Message list with scroll, date separators, attachments |
-| `src/ui/widgets/server_tree.rs` | 514 | UI | Sidebar tree: guilds → channels → DMs |
+| `src/ui/widgets/server_tree.rs` | 580+ | UI | Sidebar tree: guilds → channels → DMs, navigation helpers, auto-scroll |
 | `src/ui/widgets/status_bar.rs` | 345 | UI | Connection state, mode, pane count, zoom indicator |
 
 ## Architecture Layers
@@ -69,14 +69,14 @@
 ## Key Types & Where They Live
 
 ### State & Actions (`domain/types.rs`)
-- `Action` — 30-variant enum, the command pattern for all state mutations
+- `Action` — 37-variant enum, the command pattern for all state mutations (includes 7 sidebar nav variants)
 - `ConnectionState` — `Disconnected | Connecting | Connected { session_id, resume_url, sequence } | Resuming`
 - `CachedMessage` — message with lazy `rendered: Option<Vec<Line>>` for markdown cache
 - `HttpRequest` / `DbRequest` / `BackgroundResult` — channel message types for async actors
 - `PaneId(u32)`, `ScrollState`, `InputState`, `SplitDirection`, `Direction`
 
 ### Application State (`app.rs`)
-- `AppState` — owns: `DiscordCache`, `ConnectionState`, `PaneManager` (single source of truth for all pane state — the flat `panes: Vec<PaneState>` and `focused_pane: usize` fields were removed), `SidebarState`, `InputMode`, `AppConfig`, `Theme`
+- `AppState` — owns: `DiscordCache`, `ConnectionState`, `PaneManager` (single source of truth for all pane state), `SidebarState`, `sidebar_focused: bool`, `InputMode`, `AppConfig`, `Theme`
 - `apply_action(Action, &mut AppState) -> bool` — **the only function that mutates AppState**
 - `App` — wraps `AppState` with `dirty` flag and terminal setup/teardown
 

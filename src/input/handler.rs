@@ -67,7 +67,7 @@ fn handle_pane_prefix_mode(key: KeyEvent) -> (Option<Action>, InputMode) {
         KeyCode::Char('x') => Some(Action::ClosePane),
         KeyCode::Char('o') => Some(Action::FocusNextPane),
         KeyCode::Char('z') => Some(Action::ToggleZoom),
-        KeyCode::Char('s') => Some(Action::ToggleSidebar),
+        KeyCode::Char('s') => Some(Action::FocusSidebar),
 
         // Ctrl+Arrow → resize pane, plain Arrow → directional focus
         KeyCode::Up if has_ctrl => Some(Action::ResizePane(Direction::Up, 1)),
@@ -234,9 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn pane_prefix_s_toggles_sidebar() {
+    fn pane_prefix_s_focuses_sidebar() {
         let (action, _) = handle_key_event(key(KeyCode::Char('s')), InputMode::PanePrefix);
-        assert_eq!(action, Some(Action::ToggleSidebar));
+        assert_eq!(action, Some(Action::FocusSidebar));
     }
 
     #[test]

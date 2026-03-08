@@ -200,6 +200,15 @@ pub enum Action {
     ToggleSidebar,
     ToggleCommandPalette,
 
+    // Sidebar navigation
+    SidebarNavigateUp,
+    SidebarNavigateDown,
+    SidebarSelect,
+    SidebarCollapse,
+    SidebarToggleCollapse,
+    FocusSidebar,
+    FocusPaneArea,
+
     // Message interaction
     StartReply,
     StartEdit,
@@ -478,6 +487,13 @@ mod tests {
             Action::SwapPane(Direction::Right),
             Action::ToggleSidebar,
             Action::ToggleCommandPalette,
+            Action::SidebarNavigateUp,
+            Action::SidebarNavigateDown,
+            Action::SidebarSelect,
+            Action::SidebarCollapse,
+            Action::SidebarToggleCollapse,
+            Action::FocusSidebar,
+            Action::FocusPaneArea,
             Action::StartReply,
             Action::StartEdit,
             Action::StartDelete,
@@ -488,7 +504,7 @@ mod tests {
             Action::Quit,
             Action::ForceQuit,
         ];
-        assert_eq!(actions.len(), 31);
+        assert_eq!(actions.len(), 38);
     }
 
     #[test]

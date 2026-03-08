@@ -69,8 +69,13 @@ impl<'a> StatusBar<'a> {
 
     fn mode_indicator(&self) -> Span<'static> {
         let theme = &self.state.theme;
+        let label = if self.state.sidebar_focused {
+            "[SIDEBAR]".to_string()
+        } else {
+            format!("[{}]", self.state.input_mode.display_name())
+        };
         Span::styled(
-            format!("[{}]", self.state.input_mode.display_name()),
+            label,
             ratatui::style::Style::default().fg(theme.status_mode_fg),
         )
     }
@@ -337,6 +342,16 @@ mod tests {
         let buf = render_status_bar(&state);
         let text = buffer_text(&buf);
         assert!(text.contains("[2 panes]"), "text was: {}", text);
+    }
+
+    #[test]
+    fn renders_sidebar_mode_indicator() {
+        let mut state = test_state();
+        state.sidebar_focused = true;
+        let buf = render_status_bar(&state);
+        let text = buffer_text(&buf);
+        assert!(text.contains("[SIDEBAR]"), "text was: {}", text);
+        assert!(!text.contains("[NORMAL]"), "text was: {}", text);
     }
 
     #[test]

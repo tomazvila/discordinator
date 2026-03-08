@@ -32,10 +32,15 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &AppState) {
         let sidebar_area = horizontal[0];
         let pane_area = horizontal[1];
 
-        // Render sidebar with border
+        // Render sidebar with border (active when focused)
+        let border_style = if state.sidebar_focused {
+            state.theme.active_border_style()
+        } else {
+            state.theme.inactive_border_style()
+        };
         let sidebar_block = Block::default()
             .borders(Borders::RIGHT)
-            .border_style(state.theme.inactive_border_style());
+            .border_style(border_style);
         let sidebar_inner = sidebar_block.inner(sidebar_area);
         sidebar_block.render(sidebar_area, buf);
 
