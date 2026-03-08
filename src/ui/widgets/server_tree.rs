@@ -35,7 +35,20 @@ pub enum TreeItem {
     },
 }
 
+/// Check if a channel type is displayable in the TUI (text-based channels only).
+fn is_displayable_channel(kind: twilight_model::channel::ChannelType) -> bool {
+    matches!(
+        kind,
+        twilight_model::channel::ChannelType::GuildText
+            | twilight_model::channel::ChannelType::GuildAnnouncement
+            | twilight_model::channel::ChannelType::GuildForum
+    )
+}
+
 /// Build the flat tree of items from cache state.
+/// Channels are sorted by Discord's hierarchy: categories sorted by position,
+/// with child channels nested underneath sorted by position. Orphan channels
+/// (no parent category) appear before categories. Voice/stage channels are filtered out.
 pub fn build_tree(cache: &DiscordCache, sidebar: &SidebarState) -> Vec<TreeItem> {
     let mut items = Vec::new();
 
@@ -50,29 +63,48 @@ pub fn build_tree(cache: &DiscordCache, sidebar: &SidebarState) -> Vec<TreeItem>
             });
 
             if !collapsed {
-                for &channel_id in &guild.channel_order {
-                    if let Some(channel) = cache.channels.get(&channel_id) {
-                        let is_category =
-                            channel.kind == twilight_model::channel::ChannelType::GuildCategory;
-                        let indent = if is_category { 1 } else { 2 };
+                // Collect categories and sort by position
+                let mut categories: Vec<_> = guild
+                    .channel_order
+                    .iter()
+                    .filter_map(|&ch_id| cache.channels.get(&ch_id))
+                    .filter(|ch| ch.kind == twilight_model::channel::ChannelType::GuildCategory)
+                    .collect();
+                categories.sort_by_key(|ch| ch.position);
 
-                        let mention_count = cache
-                            .read_states
-                            .get(&channel_id)
-                            .map_or(0, |rs| rs.mention_count);
+                // Collect all non-category channels for this guild
+                let guild_channels: Vec<_> = guild
+                    .channel_order
+                    .iter()
+                    .filter_map(|&ch_id| cache.channels.get(&ch_id))
+                    .filter(|ch| ch.kind != twilight_model::channel::ChannelType::GuildCategory)
+                    .filter(|ch| is_displayable_channel(ch.kind))
+                    .collect();
 
-                        // Mark as unread if there's a read state entry
-                        let has_read_state = cache.read_states.contains_key(&channel_id);
+                // Orphan channels: no parent_id, sorted by position
+                let mut orphans: Vec<_> = guild_channels
+                    .iter()
+                    .filter(|ch| ch.parent_id.is_none())
+                    .collect();
+                orphans.sort_by_key(|ch| ch.position);
 
-                        items.push(TreeItem::Channel {
-                            id: channel_id,
-                            guild_id,
-                            name: channel.name.clone(),
-                            is_category,
-                            indent,
-                            unread: has_read_state,
-                            mention_count,
-                        });
+                // Emit orphans first (before any categories)
+                for ch in &orphans {
+                    push_channel_item(&mut items, ch, guild_id, cache, false);
+                }
+
+                // Emit each category followed by its children
+                for cat in &categories {
+                    push_channel_item(&mut items, cat, guild_id, cache, true);
+
+                    let mut children: Vec<_> = guild_channels
+                        .iter()
+                        .filter(|ch| ch.parent_id == Some(cat.id))
+                        .collect();
+                    children.sort_by_key(|ch| ch.position);
+
+                    for ch in &children {
+                        push_channel_item(&mut items, ch, guild_id, cache, false);
                     }
                 }
             }
@@ -92,6 +124,32 @@ pub fn build_tree(cache: &DiscordCache, sidebar: &SidebarState) -> Vec<TreeItem>
     }
 
     items
+}
+
+/// Helper to push a channel `TreeItem` into the items list.
+fn push_channel_item(
+    items: &mut Vec<TreeItem>,
+    channel: &crate::domain::types::CachedChannel,
+    guild_id: Id<GuildMarker>,
+    cache: &DiscordCache,
+    is_category: bool,
+) {
+    let indent = if is_category { 1 } else { 2 };
+    let mention_count = cache
+        .read_states
+        .get(&channel.id)
+        .map_or(0, |rs| rs.mention_count);
+    let has_read_state = cache.read_states.contains_key(&channel.id);
+
+    items.push(TreeItem::Channel {
+        id: channel.id,
+        guild_id,
+        name: channel.name.clone(),
+        is_category,
+        indent,
+        unread: has_read_state,
+        mention_count,
+    });
 }
 
 /// Server/channel tree sidebar widget.
@@ -250,9 +308,9 @@ pub fn find_channel_index(items: &[TreeItem], channel_id: Id<ChannelMarker>) -> 
 pub fn find_parent_guild_index(items: &[TreeItem], index: usize) -> Option<usize> {
     match items.get(index)? {
         TreeItem::Guild { .. } => Some(index),
-        TreeItem::Channel { guild_id, .. } => items.iter().position(|item| {
-            matches!(item, TreeItem::Guild { id, .. } if *id == *guild_id)
-        }),
+        TreeItem::Channel { guild_id, .. } => items
+            .iter()
+            .position(|item| matches!(item, TreeItem::Guild { id, .. } if *id == *guild_id)),
         _ => None,
     }
 }
@@ -585,6 +643,265 @@ mod tests {
             .map(|x| buf[(x, 1u16)].symbol().to_string())
             .collect::<String>();
         assert!(line1.contains("random"), "line1 was: {}", line1);
+    }
+
+    #[test]
+    fn build_tree_sorts_channels_by_position_under_categories() {
+        let mut cache = DiscordCache::default();
+        let guild_id = Id::new(1);
+        let cat_general = Id::new(10); // "General" category, position 0
+        let cat_events = Id::new(20); // "Events" category, position 1
+        let ch_hangout = Id::new(11); // under General, position 1
+        let ch_rules = Id::new(12); // under General, position 0
+        let ch_announcements = Id::new(21); // under Events, position 0
+
+        cache.guilds.insert(
+            guild_id,
+            CachedGuild {
+                id: guild_id,
+                name: "Test".to_string(),
+                icon: None,
+                // Deliberately out of order to test sorting
+                channel_order: vec![
+                    ch_hangout,
+                    cat_events,
+                    ch_announcements,
+                    ch_rules,
+                    cat_general,
+                ],
+                roles: HashMap::new(),
+            },
+        );
+        cache.guild_order.push(guild_id);
+
+        // General category (position 0)
+        cache.channels.insert(
+            cat_general,
+            CachedChannel {
+                id: cat_general,
+                guild_id: Some(guild_id),
+                name: "General".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildCategory,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        // Events category (position 1)
+        cache.channels.insert(
+            cat_events,
+            CachedChannel {
+                id: cat_events,
+                guild_id: Some(guild_id),
+                name: "Events".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildCategory,
+                position: 1,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        // rules under General (position 0)
+        cache.channels.insert(
+            ch_rules,
+            CachedChannel {
+                id: ch_rules,
+                guild_id: Some(guild_id),
+                name: "rules".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: Some(cat_general),
+                topic: None,
+            },
+        );
+        // hangout under General (position 1)
+        cache.channels.insert(
+            ch_hangout,
+            CachedChannel {
+                id: ch_hangout,
+                guild_id: Some(guild_id),
+                name: "hangout".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 1,
+                parent_id: Some(cat_general),
+                topic: None,
+            },
+        );
+        // announcements under Events (position 0)
+        cache.channels.insert(
+            ch_announcements,
+            CachedChannel {
+                id: ch_announcements,
+                guild_id: Some(guild_id),
+                name: "announcements".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: Some(cat_events),
+                topic: None,
+            },
+        );
+
+        let sidebar = SidebarState::default();
+        let items = build_tree(&cache, &sidebar);
+
+        // Expected order: Guild, General(cat), rules, hangout, Events(cat), announcements
+        assert_eq!(items.len(), 6);
+        assert!(matches!(&items[0], TreeItem::Guild { name, .. } if name == "Test"));
+        assert!(
+            matches!(&items[1], TreeItem::Channel { name, is_category: true, .. } if name == "General")
+        );
+        assert!(
+            matches!(&items[2], TreeItem::Channel { name, is_category: false, .. } if name == "rules")
+        );
+        assert!(
+            matches!(&items[3], TreeItem::Channel { name, is_category: false, .. } if name == "hangout")
+        );
+        assert!(
+            matches!(&items[4], TreeItem::Channel { name, is_category: true, .. } if name == "Events")
+        );
+        assert!(
+            matches!(&items[5], TreeItem::Channel { name, is_category: false, .. } if name == "announcements")
+        );
+    }
+
+    #[test]
+    fn build_tree_orphan_channels_come_before_categories() {
+        // Channels with no parent_id should appear before any categories
+        let mut cache = DiscordCache::default();
+        let guild_id = Id::new(1);
+        let cat_id = Id::new(10);
+        let orphan_id = Id::new(11);
+        let child_id = Id::new(12);
+
+        cache.guilds.insert(
+            guild_id,
+            CachedGuild {
+                id: guild_id,
+                name: "Test".to_string(),
+                icon: None,
+                channel_order: vec![child_id, cat_id, orphan_id],
+                roles: HashMap::new(),
+            },
+        );
+        cache.guild_order.push(guild_id);
+
+        cache.channels.insert(
+            cat_id,
+            CachedChannel {
+                id: cat_id,
+                guild_id: Some(guild_id),
+                name: "Category".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildCategory,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        cache.channels.insert(
+            orphan_id,
+            CachedChannel {
+                id: orphan_id,
+                guild_id: Some(guild_id),
+                name: "orphan".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        cache.channels.insert(
+            child_id,
+            CachedChannel {
+                id: child_id,
+                guild_id: Some(guild_id),
+                name: "child".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: Some(cat_id),
+                topic: None,
+            },
+        );
+
+        let sidebar = SidebarState::default();
+        let items = build_tree(&cache, &sidebar);
+
+        // Expected: Guild, orphan (no category), Category, child
+        assert_eq!(items.len(), 4);
+        assert!(matches!(&items[0], TreeItem::Guild { .. }));
+        assert!(
+            matches!(&items[1], TreeItem::Channel { name, is_category: false, .. } if name == "orphan")
+        );
+        assert!(
+            matches!(&items[2], TreeItem::Channel { name, is_category: true, .. } if name == "Category")
+        );
+        assert!(
+            matches!(&items[3], TreeItem::Channel { name, is_category: false, .. } if name == "child")
+        );
+    }
+
+    #[test]
+    fn build_tree_filters_voice_channels() {
+        let mut cache = DiscordCache::default();
+        let guild_id = Id::new(1);
+        let text_id = Id::new(10);
+        let voice_id = Id::new(11);
+        let stage_id = Id::new(12);
+
+        cache.guilds.insert(
+            guild_id,
+            CachedGuild {
+                id: guild_id,
+                name: "Test".to_string(),
+                icon: None,
+                channel_order: vec![text_id, voice_id, stage_id],
+                roles: HashMap::new(),
+            },
+        );
+        cache.guild_order.push(guild_id);
+
+        cache.channels.insert(
+            text_id,
+            CachedChannel {
+                id: text_id,
+                guild_id: Some(guild_id),
+                name: "text".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildText,
+                position: 0,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        cache.channels.insert(
+            voice_id,
+            CachedChannel {
+                id: voice_id,
+                guild_id: Some(guild_id),
+                name: "voice".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildVoice,
+                position: 1,
+                parent_id: None,
+                topic: None,
+            },
+        );
+        cache.channels.insert(
+            stage_id,
+            CachedChannel {
+                id: stage_id,
+                guild_id: Some(guild_id),
+                name: "stage".to_string(),
+                kind: twilight_model::channel::ChannelType::GuildStageVoice,
+                position: 2,
+                parent_id: None,
+                topic: None,
+            },
+        );
+
+        let sidebar = SidebarState::default();
+        let items = build_tree(&cache, &sidebar);
+
+        // Only Guild + text channel, voice/stage filtered out
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], TreeItem::Guild { .. }));
+        assert!(matches!(&items[1], TreeItem::Channel { name, .. } if name == "text"));
     }
 
     #[test]

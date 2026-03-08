@@ -134,6 +134,31 @@ impl PaneNode {
         }
     }
 
+    /// Collect all active guild→channel subscriptions from all leaf panes.
+    /// Groups channels by guild ID and deduplicates.
+    pub fn active_guild_channels(&self) -> HashMap<Id<GuildMarker>, Vec<Id<ChannelMarker>>> {
+        let mut map: HashMap<Id<GuildMarker>, Vec<Id<ChannelMarker>>> = HashMap::new();
+        self.collect_guild_channels(&mut map);
+        map
+    }
+
+    fn collect_guild_channels(&self, map: &mut HashMap<Id<GuildMarker>, Vec<Id<ChannelMarker>>>) {
+        match self {
+            Self::Leaf(pane) => {
+                if let (Some(guild_id), Some(channel_id)) = (pane.guild_id, pane.channel_id) {
+                    let channels = map.entry(guild_id).or_default();
+                    if !channels.contains(&channel_id) {
+                        channels.push(channel_id);
+                    }
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.collect_guild_channels(map);
+                second.collect_guild_channels(map);
+            }
+        }
+    }
+
     /// Split a leaf pane into two. The original pane stays in `first`,
     /// a new pane is created in `second`. Returns the new pane's ID.
     /// Returns None if the pane is not found.
@@ -1453,9 +1478,9 @@ mod tests {
 
         // Make P2 clearly closer to P0's center than P1
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 0, 40, 24)),  // center: (20, 12)
-            (id1, Rect::new(40, 0, 40, 8)),          // center: (60, 4)
-            (id2, Rect::new(40, 8, 40, 16)),         // center: (60, 16)
+            (PaneId(0), Rect::new(0, 0, 40, 24)), // center: (20, 12)
+            (id1, Rect::new(40, 0, 40, 8)),       // center: (60, 4)
+            (id2, Rect::new(40, 8, 40, 16)),      // center: (60, 16)
         ]);
 
         // P0 center is at (20, 12). P1 center at (60,4), P2 center at (60,16).
@@ -1477,9 +1502,9 @@ mod tests {
 
         // Use an asymmetric layout so one pane is clearly closer
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 0, 80, 12)),   // center: (40, 6)
-            (id1, Rect::new(0, 12, 30, 12)),          // center: (15, 18)
-            (id2, Rect::new(30, 12, 50, 12)),         // center: (55, 18)
+            (PaneId(0), Rect::new(0, 0, 80, 12)), // center: (40, 6)
+            (id1, Rect::new(0, 12, 30, 12)),      // center: (15, 18)
+            (id2, Rect::new(30, 12, 50, 12)),     // center: (55, 18)
         ]);
         // P1: |18-6| + |15-40|/2 = 12 + 12 = 24
         // P2: |18-6| + |55-40|/2 = 12 + 7 = 19
@@ -1494,8 +1519,8 @@ mod tests {
         let mut pm = PaneManager::new();
         let id1 = pm.split(SplitDirection::Vertical);
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 0, 40, 24)),   // center: (20, 12)
-            (id1, Rect::new(40, 0, 40, 24)),          // center: (60, 12)
+            (PaneId(0), Rect::new(0, 0, 40, 24)), // center: (20, 12)
+            (id1, Rect::new(40, 0, 40, 24)),      // center: (60, 12)
         ]);
         pm.focused_pane_id = PaneId(0);
         // Same center_y — neither is strictly above/below
@@ -1516,10 +1541,10 @@ mod tests {
         // [P0:top-left] [P1:top-right]
         // [P2:bot-left]  [P3:bot-right]
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 0, 40, 12)),    // center: (20, 6)
-            (id1, Rect::new(40, 0, 40, 12)),           // center: (60, 6)
-            (id2, Rect::new(0, 12, 40, 12)),           // center: (20, 18)
-            (id3, Rect::new(40, 12, 40, 12)),          // center: (60, 18)
+            (PaneId(0), Rect::new(0, 0, 40, 12)), // center: (20, 6)
+            (id1, Rect::new(40, 0, 40, 12)),      // center: (60, 6)
+            (id2, Rect::new(0, 12, 40, 12)),      // center: (20, 18)
+            (id3, Rect::new(40, 12, 40, 12)),     // center: (60, 18)
         ]);
 
         // From P0: Right→P1, Down→P2
@@ -1564,9 +1589,9 @@ mod tests {
         // P2: center (42, 20) — dy=10, dx=2. Correct: 10 + 2/2 = 11
         // P1 wins (10 < 11)
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(30, 0, 20, 20)),  // center: (40, 10)
-            (id1, Rect::new(40, 10, 20, 10)),         // center: (50, 15)
-            (id2, Rect::new(32, 15, 20, 10)),         // center: (42, 20)
+            (PaneId(0), Rect::new(30, 0, 20, 20)), // center: (40, 10)
+            (id1, Rect::new(40, 10, 20, 10)),      // center: (50, 15)
+            (id2, Rect::new(32, 15, 20, 10)),      // center: (42, 20)
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Down, &positions));
@@ -1593,7 +1618,10 @@ mod tests {
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Down, &positions));
-        assert_eq!(pm.focused_pane_id, id2, "P2 should win with correct /2 formula");
+        assert_eq!(
+            pm.focused_pane_id, id2,
+            "P2 should win with correct /2 formula"
+        );
     }
 
     #[test]
@@ -1611,9 +1639,9 @@ mod tests {
         // P2: center (40, 10) — dy=30. Correct: 30. With +: |10+40|=50
         // Correct: P1(10) wins. With -→+: P2(50) wins. DIFFERENT.
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(30, 30, 20, 20)),  // center: (40, 40)
-            (id1, Rect::new(30, 20, 20, 20)),          // center: (40, 30)
-            (id2, Rect::new(30, 0, 20, 20)),           // center: (40, 10)
+            (PaneId(0), Rect::new(30, 30, 20, 20)), // center: (40, 40)
+            (id1, Rect::new(30, 20, 20, 20)),       // center: (40, 30)
+            (id2, Rect::new(30, 0, 20, 20)),        // center: (40, 10)
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Up, &positions));
@@ -1632,9 +1660,9 @@ mod tests {
         // P1: center (15, 50) — dx=5, dy=10. Correct: 5 + 10/2 = 10
         // P2: center (20, 42) — dx=10, dy=2. Correct: 10 + 2/2 = 11
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 30, 20, 20)),   // center: (10, 40)
-            (id1, Rect::new(5, 40, 20, 20)),           // center: (15, 50)
-            (id2, Rect::new(10, 32, 20, 20)),          // center: (20, 42)
+            (PaneId(0), Rect::new(0, 30, 20, 20)), // center: (10, 40)
+            (id1, Rect::new(5, 40, 20, 20)),       // center: (15, 50)
+            (id2, Rect::new(10, 32, 20, 20)),      // center: (20, 42)
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Right, &positions));
@@ -1679,7 +1707,10 @@ mod tests {
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Right, &positions));
-        assert_eq!(pm.focused_pane_id, id2, "P2 should win with correct /2 formula");
+        assert_eq!(
+            pm.focused_pane_id, id2,
+            "P2 should win with correct /2 formula"
+        );
     }
 
     #[test]
@@ -1693,9 +1724,9 @@ mod tests {
 
         // Two candidates at equal distance — first found should win with `<`, last with `<=`
         let positions = make_positions(&[
-            (PaneId(0), Rect::new(0, 0, 20, 40)),   // center: (10, 20)
-            (id1, Rect::new(20, 0, 20, 20)),          // center: (30, 10), going Right: dx=20, dy=10 → 20+5=25
-            (id2, Rect::new(20, 20, 20, 20)),         // center: (30, 30), going Right: dx=20, dy=10 → 20+5=25
+            (PaneId(0), Rect::new(0, 0, 20, 40)), // center: (10, 20)
+            (id1, Rect::new(20, 0, 20, 20)), // center: (30, 10), going Right: dx=20, dy=10 → 20+5=25
+            (id2, Rect::new(20, 20, 20, 20)), // center: (30, 30), going Right: dx=20, dy=10 → 20+5=25
         ]);
         pm.focused_pane_id = PaneId(0);
         assert!(pm.focus_direction(Direction::Right, &positions));
@@ -1788,7 +1819,10 @@ mod tests {
             focus_idx, 1,
             "Focus should be at index 1 (same position as closed pane), got index {focus_idx}"
         );
-        assert_eq!(pm.focused_pane_id, id2, "Focus should be on P2 after closing middle pane");
+        assert_eq!(
+            pm.focused_pane_id, id2,
+            "Focus should be on P2 after closing middle pane"
+        );
     }
 
     #[test]
@@ -1803,6 +1837,81 @@ mod tests {
 
         let leaves = pm.all_pane_ids();
         assert!(leaves.contains(&pm.focused_pane_id));
+    }
+
+    #[test]
+    fn active_guild_channels_collects_all_panes() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+
+        // Assign guild/channel to each pane
+        let pane0 = pm.root.find_mut(PaneId(0)).unwrap();
+        pane0.guild_id = Some(Id::new(100));
+        pane0.channel_id = Some(Id::new(10));
+
+        let pane1 = pm.root.find_mut(id1).unwrap();
+        pane1.guild_id = Some(Id::new(200));
+        pane1.channel_id = Some(Id::new(20));
+
+        let subs = pm.root.active_guild_channels();
+        assert_eq!(subs.len(), 2); // two guilds
+        assert!(subs[&Id::new(100)].contains(&Id::new(10)));
+        assert!(subs[&Id::new(200)].contains(&Id::new(20)));
+    }
+
+    #[test]
+    fn active_guild_channels_groups_same_guild() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+
+        // Both panes in the same guild, different channels
+        let pane0 = pm.root.find_mut(PaneId(0)).unwrap();
+        pane0.guild_id = Some(Id::new(100));
+        pane0.channel_id = Some(Id::new(10));
+
+        let pane1 = pm.root.find_mut(id1).unwrap();
+        pane1.guild_id = Some(Id::new(100));
+        pane1.channel_id = Some(Id::new(20));
+
+        let subs = pm.root.active_guild_channels();
+        assert_eq!(subs.len(), 1); // one guild
+        let channels = &subs[&Id::new(100)];
+        assert_eq!(channels.len(), 2);
+        assert!(channels.contains(&Id::new(10)));
+        assert!(channels.contains(&Id::new(20)));
+    }
+
+    #[test]
+    fn active_guild_channels_skips_empty_panes() {
+        let mut pm = PaneManager::new();
+        let _id1 = pm.split(SplitDirection::Horizontal);
+
+        // Only assign channel to pane0, leave pane1 empty
+        let pane0 = pm.root.find_mut(PaneId(0)).unwrap();
+        pane0.guild_id = Some(Id::new(100));
+        pane0.channel_id = Some(Id::new(10));
+
+        let subs = pm.root.active_guild_channels();
+        assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn active_guild_channels_deduplicates() {
+        let mut pm = PaneManager::new();
+        let id1 = pm.split(SplitDirection::Horizontal);
+
+        // Both panes viewing the exact same guild+channel
+        let pane0 = pm.root.find_mut(PaneId(0)).unwrap();
+        pane0.guild_id = Some(Id::new(100));
+        pane0.channel_id = Some(Id::new(10));
+
+        let pane1 = pm.root.find_mut(id1).unwrap();
+        pane1.guild_id = Some(Id::new(100));
+        pane1.channel_id = Some(Id::new(10));
+
+        let subs = pm.root.active_guild_channels();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[&Id::new(100)].len(), 1); // deduplicated
     }
 
     #[test]

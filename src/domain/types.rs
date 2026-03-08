@@ -276,6 +276,18 @@ pub enum DbRequest {
     },
 }
 
+/// Commands sent from the main loop to the gateway connection.
+#[derive(Debug, Clone)]
+pub enum GatewayCommand {
+    /// Subscribe to guild channels via opcode 14 (Lazy Request).
+    /// Required for user accounts to receive `MESSAGE_CREATE` events.
+    /// Sends one op 14 per guild, with all channels grouped together.
+    Subscribe {
+        guild_id: Id<GuildMarker>,
+        channels: Vec<Id<ChannelMarker>>,
+    },
+}
+
 /// Results from background tasks back to main loop.
 #[derive(Debug, Clone)]
 pub enum BackgroundResult {

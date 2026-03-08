@@ -45,10 +45,10 @@ impl<'a> MessageView<'a> {
             return 1;
         }
         let author_name = self.cache.resolve_user_name(msg.author_id);
-        let time = msg.timestamp.get(11..16).unwrap_or("??:??");
+        let time = format_local_time(&msg.timestamp);
         let edited_len = if msg.edited_timestamp.is_some() { 9 } else { 0 }; // " (edited)"
 
-        let total_width = display_width(time) + 1 // "HH:MM "
+        let total_width = display_width(&time) + 1 // "HH:MM "
             + display_width(&author_name) + 2 // "name: "
             + display_width(&msg.content)
             + edited_len;
@@ -244,11 +244,8 @@ impl Widget for MessageView<'_> {
             // Author name
             let author_name = self.cache.resolve_user_name(msg.author_id);
 
-            // Timestamp (just time portion)
-            let time = msg
-                .timestamp
-                .get(11..16) // "HH:MM"
-                .unwrap_or("??:??");
+            // Timestamp (converted to local timezone)
+            let time = format_local_time(&msg.timestamp);
 
             // Edited indicator
             let edited = if msg.edited_timestamp.is_some() {
@@ -320,6 +317,19 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Convert a UTC ISO 8601 timestamp to local time "HH:MM" string.
+pub fn format_local_time(timestamp: &str) -> String {
+    use chrono::{DateTime, Local, Utc};
+
+    timestamp.parse::<DateTime<Utc>>().map_or_else(
+        |_| timestamp.get(11..16).unwrap_or("??:??").to_string(),
+        |utc| {
+            let local: DateTime<Local> = utc.with_timezone(&Local);
+            local.format("%H:%M").to_string()
+        },
+    )
+}
+
 /// Check if the view should auto-scroll (is in Following mode).
 pub fn is_following(scroll: &ScrollState) -> bool {
     matches!(scroll, ScrollState::Following)
@@ -388,6 +398,25 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_converts_to_local_time() {
+        // UTC timestamp "2024-01-15T10:30:00Z" — the displayed time should be
+        // converted to local timezone, not shown as raw UTC "10:30".
+        let local_time = format_local_time("2024-01-15T10:30:00Z");
+        // The result must be a valid HH:MM string (not "??:??")
+        assert_ne!(local_time, "??:??");
+        // At minimum, it should be 5 chars like "HH:MM"
+        assert_eq!(local_time.len(), 5);
+        assert_eq!(&local_time[2..3], ":");
+
+        // Verify it actually parses and converts properly
+        use chrono::{DateTime, Local, Timelike, Utc};
+        let utc: DateTime<Utc> = "2024-01-15T10:30:00Z".parse().unwrap();
+        let local: DateTime<Local> = utc.with_timezone(&Local);
+        let expected = format!("{:02}:{:02}", local.hour(), local.minute());
+        assert_eq!(local_time, expected);
+    }
+
+    #[test]
     fn renders_messages_with_author_and_time() {
         let mut messages = VecDeque::new();
         messages.push_back(make_msg(1, 100, "Hello world", "2024-01-15T10:30:00Z"));
@@ -401,7 +430,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        // Find the message line
+        // Find the message line (use local time for comparison)
+        let expected_time = format_local_time("2024-01-15T10:30:00Z");
         let mut found_time = false;
         let mut found_author = false;
         let mut found_content = false;
@@ -409,7 +439,7 @@ mod tests {
             let line: String = (0..60)
                 .map(|x| buf[(x, y as u16)].symbol().to_string())
                 .collect::<String>();
-            if line.contains("10:30") {
+            if line.contains(&expected_time) {
                 found_time = true;
             }
             if line.contains("Alice") {
@@ -419,7 +449,7 @@ mod tests {
                 found_content = true;
             }
         }
-        assert!(found_time, "Should show time");
+        assert!(found_time, "Should show time ({expected_time})");
         assert!(found_author, "Should show author");
         assert!(found_content, "Should show content");
     }
@@ -624,10 +654,7 @@ mod tests {
     fn wrap_spans_preserves_styles_across_break() {
         let style1 = ratatui::style::Style::default().fg(ratatui::style::Color::Red);
         let style2 = ratatui::style::Style::default().fg(ratatui::style::Color::Blue);
-        let spans = vec![
-            Span::styled("aaa", style1),
-            Span::styled("bbb", style2),
-        ];
+        let spans = vec![Span::styled("aaa", style1), Span::styled("bbb", style2)];
         let lines = wrap_spans(spans, 4);
         // "aaa" (3 wide, style1) + "b" (1 wide, style2) = 4 on line 1
         // "bb" (2 wide, style2) on line 2
@@ -661,7 +688,10 @@ mod tests {
                 lines_with_a += 1;
             }
         }
-        assert!(lines_with_a >= 2, "Long message should wrap to multiple lines, got {lines_with_a}");
+        assert!(
+            lines_with_a >= 2,
+            "Long message should wrap to multiple lines, got {lines_with_a}"
+        );
     }
 
     #[test]

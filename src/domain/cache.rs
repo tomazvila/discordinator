@@ -86,6 +86,37 @@ impl DiscordCache {
         }
     }
 
+    /// Replace a channel's messages with fetched results, preserving any
+    /// gateway messages that arrived after the fetch was initiated (i.e.
+    /// messages with IDs newer than the newest fetched message).
+    pub fn replace_messages(
+        &mut self,
+        channel_id: Id<ChannelMarker>,
+        messages: Vec<CachedMessage>,
+    ) {
+        let deque = self.messages.entry(channel_id).or_default();
+        let newest_fetched_id = messages.last().map(|m| m.id);
+
+        // Keep gateway messages that are newer than the fetched batch
+        let gateway_tail: Vec<CachedMessage> = if let Some(newest_id) = newest_fetched_id {
+            deque.iter().filter(|m| m.id > newest_id).cloned().collect()
+        } else {
+            vec![]
+        };
+
+        deque.clear();
+        for msg in messages {
+            deque.push_back(msg);
+        }
+        for msg in gateway_tail {
+            deque.push_back(msg);
+        }
+
+        while deque.len() > MAX_CACHED_MESSAGES_PER_CHANNEL {
+            deque.pop_front();
+        }
+    }
+
     /// Update a message in the cache by ID. Returns true if found.
     pub fn update_message(
         &mut self,
@@ -425,6 +456,55 @@ mod tests {
         let deque = cache.messages.get(&Id::new(10)).unwrap();
         assert_eq!(deque.len(), MAX_CACHED_MESSAGES_PER_CHANNEL);
         assert_eq!(deque.front().unwrap().content, "old history");
+    }
+
+    // --- replace_messages ---
+
+    #[test]
+    fn replace_messages_clears_and_sets() {
+        let mut cache = DiscordCache::default();
+        cache.insert_message(make_message(1, 10, "old1"));
+        cache.insert_message(make_message(2, 10, "old2"));
+
+        let new_msgs = vec![make_message(3, 10, "new1"), make_message(4, 10, "new2")];
+        cache.replace_messages(Id::new(10), new_msgs);
+
+        let deque = cache.messages.get(&Id::new(10)).unwrap();
+        assert_eq!(deque.len(), 2);
+        assert_eq!(deque[0].id, Id::new(3));
+        assert_eq!(deque[1].id, Id::new(4));
+    }
+
+    #[test]
+    fn replace_messages_preserves_newer_gateway_messages() {
+        let mut cache = DiscordCache::default();
+        // Existing messages: 1, 2, 100 (100 arrived via gateway during fetch)
+        cache.insert_message(make_message(1, 10, "old"));
+        cache.insert_message(make_message(2, 10, "old"));
+        cache.insert_message(make_message(100, 10, "gateway"));
+
+        // Fetch returns messages 1, 2 (not including 100)
+        let fetched = vec![make_message(1, 10, "old"), make_message(2, 10, "old")];
+        cache.replace_messages(Id::new(10), fetched);
+
+        let deque = cache.messages.get(&Id::new(10)).unwrap();
+        assert_eq!(deque.len(), 3);
+        assert_eq!(deque[0].id, Id::new(1));
+        assert_eq!(deque[1].id, Id::new(2));
+        assert_eq!(deque[2].id, Id::new(100)); // gateway msg preserved
+    }
+
+    #[test]
+    fn replace_messages_no_duplicates_on_revisit() {
+        let mut cache = DiscordCache::default();
+        let msgs = vec![make_message(1, 10, "a"), make_message(2, 10, "b")];
+
+        cache.replace_messages(Id::new(10), msgs.clone());
+        assert_eq!(cache.messages.get(&Id::new(10)).unwrap().len(), 2);
+
+        // Second replacement with same messages
+        cache.replace_messages(Id::new(10), msgs);
+        assert_eq!(cache.messages.get(&Id::new(10)).unwrap().len(), 2);
     }
 
     // --- update_message ---

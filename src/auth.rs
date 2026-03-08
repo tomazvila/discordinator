@@ -271,27 +271,40 @@ pub async fn validate_token_via_gateway(
         .await
         .map_err(|e| eyre!("Failed to send IDENTIFY: {}", e))?;
 
-    // Wait for READY or error
-    let response = tokio::time::timeout(Duration::from_secs(10), read.next())
-        .await
-        .map_err(|_| eyre!("Timeout waiting for READY"))?
-        .ok_or_else(|| eyre!("Connection closed after IDENTIFY"))?
-        .map_err(|e| eyre!("WebSocket error after IDENTIFY: {}", e))?;
+    // Read messages until READY, InvalidSession, or timeout.
+    // Discord may send heartbeat requests or other events before READY.
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(msg) = read.next().await {
+            let msg = msg.map_err(|e| eyre!("WebSocket error after IDENTIFY: {}", e))?;
+            let text = msg
+                .into_text()
+                .map_err(|e| eyre!("Response not text: {}", e))?;
+            let payload: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| eyre!("Response parse error: {}", e))?;
 
-    let response_text = response
-        .into_text()
-        .map_err(|e| eyre!("Response not text: {}", e))?;
-    let response_payload: serde_json::Value =
-        serde_json::from_str(&response_text).map_err(|e| eyre!("Response parse error: {}", e))?;
-    let response_event = event::parse_gateway_payload(&response_payload);
+            // Respond to heartbeat requests (op 1)
+            if payload["op"].as_u64() == Some(1) {
+                let hb = serde_json::json!({"op": 1, "d": null});
+                if let Ok(hb_text) = serde_json::to_string(&hb) {
+                    let _ = write.send(Message::Text(hb_text.into())).await;
+                }
+                continue;
+            }
 
-    // Close the connection
+            let event = event::parse_gateway_payload(&payload);
+            match event {
+                GatewayEvent::Ready(_) => return Ok(true),
+                GatewayEvent::InvalidSession { .. } => return Ok(false),
+                _ => {}
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|_| eyre!("Timeout waiting for READY"))?;
+
     let _ = write.send(Message::Close(None)).await;
-
-    match response_event {
-        GatewayEvent::Ready(_) => Ok(true),
-        _ => Ok(false),
-    }
+    result
 }
 
 // === Task 40: QR Code Authentication ===
@@ -888,8 +901,7 @@ mod tests {
         let base_url = start_mock_http(400, body).await;
         let config = test_discord_config();
 
-        let result =
-            login_with_credentials("", "pass", &config, &base_url).await;
+        let result = login_with_credentials("", "pass", &config, &base_url).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1143,5 +1155,27 @@ mod tests {
                 op: "something_new".to_string(),
             }
         );
+    }
+
+    /// Integration test: validate_token_via_gateway with real token.
+    /// Run with: cargo test validate_real_token -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn validate_real_token() {
+        let token = "MTQ3NjE5MTg0MTM2NjgzNTIzMQ.G15AZf.uskt9twAYbZGXuQwwvYxxZwoZnwSaNr1arM8KQ";
+        let config = test_discord_config();
+
+        let result = validate_token_via_gateway(
+            token,
+            "wss://gateway.discord.gg/?v=10&encoding=json",
+            &config,
+        )
+        .await;
+
+        println!("validate_token_via_gateway result: {result:?}");
+        match result {
+            Ok(valid) => assert!(valid, "Token should be valid"),
+            Err(e) => panic!("Validation errored: {e}"),
+        }
     }
 }

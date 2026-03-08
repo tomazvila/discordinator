@@ -73,6 +73,7 @@
 - `ConnectionState` — `Disconnected | Connecting | Connected { session_id, resume_url, sequence } | Resuming`
 - `CachedMessage` — message with lazy `rendered: Option<Vec<Line>>` for markdown cache
 - `HttpRequest` / `DbRequest` / `BackgroundResult` — channel message types for async actors
+- `GatewayCommand` — commands from main loop to gateway (e.g. `Subscribe { guild_id, channels }` for opcode 14 lazy requests)
 - `PaneId(u32)`, `ScrollState`, `InputState`, `SplitDirection`, `Direction`
 
 ### Application State (`app.rs`)
@@ -83,16 +84,18 @@
 ### Cache (`domain/cache.rs`)
 - `DiscordCache` — `HashMap`-based store for guilds, channels, users, messages (VecDeque per channel, max 200)
 - Name resolution: `resolve_user_name()`, `resolve_channel_name()`, `resolve_role()`
+- `replace_messages()` — replaces a channel's messages from HTTP fetch, preserving newer gateway messages
 
 ### Pane System (`domain/pane.rs`)
 - `Pane` — leaf node with `channel_id`, `guild_id`, `scroll`, `input`, `selected_message`, `confirming_delete`
-- `PaneNode` — `Leaf(Pane) | Split { direction, ratio, first, second }` binary tree
+- `PaneNode` — `Leaf(Pane) | Split { direction, ratio, first, second }` binary tree, `active_guild_channels()` collects all guild→channel subscriptions
 - `PaneManager` — tree owner with `split()`, `close_focused()`, `focus_next()`, `toggle_zoom()`, `resize_focused()`, `compute_positions()`, `assign_channel()`, session serialization
 
 ### Gateway (`infrastructure/gateway.rs`)
-- `GatewayConnection` — single WebSocket session, `tokio::select!` with inline heartbeat
+- `GatewayConnection` — single WebSocket session, `tokio::select!` with inline heartbeat + command handling
 - `ZlibDecompressor` — persistent `flate2::Decompress` context across frames
-- `GatewayManager` — reconnection loop with exponential backoff (1s..30s)
+- `GatewayManager` — reconnection loop with exponential backoff (1s..30s), owns `cmd_rx` for gateway commands
+- `build_lazy_request_payload()` — builds opcode 14 guild subscription payload
 
 ### Event Parsing (`domain/event.rs`)
 - `GatewayEvent` — typed events parsed from raw JSON gateway payloads
@@ -115,6 +118,7 @@
 Terminal Input → handle_key_event() → Action → apply_action() → AppState mutation
                                                     ↓
 Gateway WS ──→ parse_gateway_payload() ──→ GatewayEvent ──→ Action ──→ apply_action()
+Gateway WS ←── GatewayCommand channel ←── subscribe_all_panes() sends Subscribe (op 14) for ALL open panes + periodic 30s re-sub
                                                     ↓
 HTTP Actor ←── HttpRequest channel ←── apply_action() sends requests
 HTTP Actor ──→ BackgroundResult ──→ main loop handles directly

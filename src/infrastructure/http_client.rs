@@ -518,18 +518,8 @@ mod tests {
 
     #[test]
     fn parse_messages_response_parses_array() {
+        // Discord API returns messages newest-first (highest ID first)
         let json = r#"[
-            {
-                "id": "123456",
-                "author": {"id": "789"},
-                "content": "Hello world",
-                "timestamp": "2024-01-01T00:00:00Z",
-                "edited_timestamp": null,
-                "mention_everyone": false,
-                "mentions": [],
-                "attachments": [],
-                "embeds": []
-            },
             {
                 "id": "123457",
                 "author": {"id": "790"},
@@ -540,16 +530,27 @@ mod tests {
                 "mentions": [],
                 "attachments": [],
                 "embeds": []
+            },
+            {
+                "id": "123456",
+                "author": {"id": "789"},
+                "content": "Hello world",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "edited_timestamp": null,
+                "mention_everyone": false,
+                "mentions": [],
+                "attachments": [],
+                "embeds": []
             }
         ]"#;
 
         let messages = parse_messages_response(json, Id::new(100)).unwrap();
-        // Discord returns newest first; we reverse to chronological
+        // After reverse: chronological order (oldest first)
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].id.get(), 123457);
-        assert_eq!(messages[0].content, "Second message");
-        assert_eq!(messages[1].id.get(), 123456);
-        assert_eq!(messages[1].content, "Hello world");
+        assert_eq!(messages[0].id.get(), 123456);
+        assert_eq!(messages[0].content, "Hello world");
+        assert_eq!(messages[1].id.get(), 123457);
+        assert_eq!(messages[1].content, "Second message");
         assert_eq!(messages[0].channel_id.get(), 100);
     }
 

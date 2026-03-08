@@ -52,6 +52,8 @@ pub enum GatewayEvent {
 }
 
 /// User-account READY event. Contains fields that bot READY doesn't have.
+/// With `capabilities` in IDENTIFY, Discord may send some fields as objects
+/// instead of arrays (e.g. `read_state`), so we use `Value` for flexibility.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadyEvent {
     pub session_id: String,
@@ -62,9 +64,9 @@ pub struct ReadyEvent {
     #[serde(default)]
     pub private_channels: Vec<serde_json::Value>,
     #[serde(default)]
-    pub read_state: Vec<serde_json::Value>,
+    pub read_state: serde_json::Value,
     #[serde(default)]
-    pub relationships: Vec<serde_json::Value>,
+    pub relationships: serde_json::Value,
     pub user: serde_json::Value,
 }
 
@@ -312,7 +314,13 @@ fn parse_message_update(data: &serde_json::Value) -> GatewayEvent {
 
 fn parse_guild_create(data: &serde_json::Value) -> GatewayEvent {
     let id = data["id"].as_str().and_then(|s| s.parse::<u64>().ok());
-    let name = data["name"].as_str().unwrap_or("").to_string();
+    // With capabilities in IDENTIFY, guild metadata is under `properties`
+    let props = &data["properties"];
+    let name = data["name"]
+        .as_str()
+        .or_else(|| props["name"].as_str())
+        .unwrap_or("")
+        .to_string();
 
     match id {
         Some(id) => {
@@ -548,6 +556,35 @@ mod tests {
             GatewayEvent::GuildCreate(guild) => {
                 assert_eq!(guild.id.get(), 555);
                 assert_eq!(guild.name, "Test Server");
+                assert_eq!(guild.channels.len(), 1);
+                assert_eq!(guild.roles.len(), 1);
+            }
+            _ => panic!("Expected GuildCreate event"),
+        }
+    }
+
+    #[test]
+    fn parse_guild_create_with_properties_wrapper() {
+        // With capabilities in IDENTIFY, guild metadata is under `properties`
+        let payload = serde_json::json!({
+            "op": 0,
+            "t": "GUILD_CREATE",
+            "s": 2,
+            "d": {
+                "id": "555",
+                "properties": {
+                    "name": "Props Server",
+                    "icon": "abc123"
+                },
+                "channels": [{"id": "10", "name": "general"}],
+                "roles": [{"id": "20", "name": "Admin"}]
+            }
+        });
+        let event = parse_gateway_payload(&payload);
+        match event {
+            GatewayEvent::GuildCreate(guild) => {
+                assert_eq!(guild.id.get(), 555);
+                assert_eq!(guild.name, "Props Server");
                 assert_eq!(guild.channels.len(), 1);
                 assert_eq!(guild.roles.len(), 1);
             }

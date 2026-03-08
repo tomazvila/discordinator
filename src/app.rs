@@ -203,7 +203,10 @@ impl App {
         // Sidebar focused: intercept navigation keys before general handler
         if self.state.sidebar_focused && self.state.input_mode == InputMode::Normal {
             // Pass through global bindings
-            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+            {
                 match key.code {
                     KeyCode::Char('q') => {
                         self.should_quit = true;
@@ -376,6 +379,11 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
                     server_tree::TreeItem::Guild { .. } => {
                         server_tree::toggle_collapse(&mut state.sidebar, &items);
                     }
+                    server_tree::TreeItem::Channel {
+                        is_category: true, ..
+                    } => {
+                        // Categories are not selectable channels
+                    }
                     server_tree::TreeItem::Channel { id, .. }
                     | server_tree::TreeItem::DmChannel { id, .. } => {
                         let channel_id = *id;
@@ -390,7 +398,9 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
         }
         Action::SidebarCollapse => {
             let items = server_tree::build_tree(&state.cache, &state.sidebar);
-            if let Some(parent_idx) = server_tree::find_parent_guild_index(&items, state.sidebar.selected_index) {
+            if let Some(parent_idx) =
+                server_tree::find_parent_guild_index(&items, state.sidebar.selected_index)
+            {
                 if let Some(server_tree::TreeItem::Guild { id, .. }) = items.get(parent_idx) {
                     state.sidebar.collapsed_guilds.insert(*id);
                     state.sidebar.selected_index = parent_idx;
@@ -593,9 +603,7 @@ pub fn apply_action(action: Action, state: &mut AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::types::{
-        CachedChannel, CachedUser, PaneId, SplitDirection,
-    };
+    use crate::domain::types::{CachedChannel, CachedUser, PaneId, SplitDirection};
 
     fn test_state() -> AppState {
         AppState::new(AppConfig::default())

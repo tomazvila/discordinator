@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::DiscordConfig;
 use crate::domain::event::{self, GatewayEvent};
+use crate::domain::types::GatewayCommand;
 use crate::infrastructure::anti_detection;
 
 /// Default Discord gateway URL.
@@ -49,8 +50,9 @@ impl GatewayConnection {
 
     /// Connect to the gateway and run the event loop.
     /// Returns session info on clean disconnect for RESUME support.
+    /// `cmd_rx` receives commands from the main loop (e.g. guild subscriptions).
     #[allow(clippy::too_many_lines)]
-    pub async fn run(self) -> Result<SessionInfo> {
+    pub async fn run(self, cmd_rx: &mut mpsc::Receiver<GatewayCommand>) -> Result<SessionInfo> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
             .await
             .wrap_err("Failed to connect to gateway")?;
@@ -187,6 +189,25 @@ impl GatewayConnection {
                     }
                 }
 
+                // Handle commands from main loop (e.g. guild subscriptions)
+                Some(cmd) = cmd_rx.recv() => {
+                    match cmd {
+                        GatewayCommand::Subscribe { guild_id, channels } => {
+                            let ch_ids: Vec<u64> = channels.iter().map(|c| c.get()).collect();
+                            let payload = build_lazy_request_payload(guild_id.get(), &ch_ids);
+                            if let Ok(text) = serde_json::to_string(&payload) {
+                                if let Err(e) = write.send(Message::Text(text.into())).await {
+                                    tracing::error!("Failed to send lazy request: {}", e);
+                                }
+                                tracing::debug!(
+                                    "Sent guild subscription for guild={} channels={:?}",
+                                    guild_id.get(), ch_ids
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // C1 fix: Actually send heartbeats on the interval
                 () = &mut next_heartbeat => {
                     // Zombie connection detection: if we didn't get ACK since last heartbeat, reconnect
@@ -230,7 +251,12 @@ impl GatewayConnection {
 
     /// Connect and send RESUME instead of IDENTIFY.
     #[allow(clippy::too_many_lines)]
-    pub async fn resume(self, session_id: &str, sequence: u64) -> Result<SessionInfo> {
+    pub async fn resume(
+        self,
+        session_id: &str,
+        sequence: u64,
+        cmd_rx: &mut mpsc::Receiver<GatewayCommand>,
+    ) -> Result<SessionInfo> {
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
             .await
             .wrap_err("Failed to connect to gateway for RESUME")?;
@@ -361,6 +387,25 @@ impl GatewayConnection {
 
                     if should_break {
                         break;
+                    }
+                }
+
+                // Handle commands from main loop (e.g. guild subscriptions)
+                Some(cmd) = cmd_rx.recv() => {
+                    match cmd {
+                        GatewayCommand::Subscribe { guild_id, channels } => {
+                            let ch_ids: Vec<u64> = channels.iter().map(|c| c.get()).collect();
+                            let payload = build_lazy_request_payload(guild_id.get(), &ch_ids);
+                            if let Ok(text) = serde_json::to_string(&payload) {
+                                if let Err(e) = write.send(Message::Text(text.into())).await {
+                                    tracing::error!("Failed to send lazy request: {}", e);
+                                }
+                                tracing::debug!(
+                                    "Sent guild subscription for guild={} channels={:?} (resume)",
+                                    guild_id.get(), ch_ids
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -499,15 +544,35 @@ impl ZlibDecompressor {
 
 /// Build the IDENTIFY (op 2) payload for user accounts.
 /// NO intents field — user accounts don't use intents.
+///
+/// Includes `capabilities` bitmask (tells Discord what events the client supports),
+/// `client_state` (enables proper guild data delivery), and `presence`.
+/// Without `capabilities`, large guilds don't deliver `MESSAGE_CREATE` events.
 pub fn build_identify_payload(token: &str, config: &DiscordConfig) -> serde_json::Value {
     let properties = anti_detection::build_identify_properties(config);
     serde_json::json!({
         "op": 2,
         "d": {
             "token": token,
+            "capabilities": 30717,
             "properties": properties,
+            "presence": {
+                "status": "online",
+                "since": 0,
+                "activities": [],
+                "afk": false
+            },
             "compress": false,
             "large_threshold": 250,
+            "client_state": {
+                "guild_versions": {},
+                "highest_last_message_id": "0",
+                "read_state_version": 0,
+                "user_guild_settings_version": -1,
+                "user_settings_version": -1,
+                "private_channels_version": "0",
+                "api_code_version": 0
+            }
         }
     })
 }
@@ -532,6 +597,33 @@ pub fn build_heartbeat_payload(sequence: Option<u64>) -> serde_json::Value {
     })
 }
 
+/// Build a Lazy Request (op 14) payload to subscribe to guild channels.
+/// User accounts must send this to receive `MESSAGE_CREATE` events for channels.
+/// Accepts multiple channel IDs to subscribe to within a single guild.
+///
+/// Includes `typing`, `threads`, `activities`, `members`, and `thread_member_lists`
+/// fields that the real Discord client sends. Without these, Discord may not fully
+/// activate the subscription — especially for large guilds.
+pub fn build_lazy_request_payload(guild_id: u64, channel_ids: &[u64]) -> serde_json::Value {
+    let guild_id_str = guild_id.to_string();
+    let mut channels = serde_json::Map::new();
+    for &ch_id in channel_ids {
+        channels.insert(ch_id.to_string(), serde_json::json!([[0, 99]]));
+    }
+    serde_json::json!({
+        "op": 14,
+        "d": {
+            "guild_id": guild_id_str,
+            "typing": true,
+            "threads": true,
+            "activities": true,
+            "members": [],
+            "channels": channels,
+            "thread_member_lists": []
+        }
+    })
+}
+
 /// Maximum backoff delay for reconnection attempts.
 const MAX_BACKOFF_SECS: u64 = 30;
 /// Initial backoff delay.
@@ -544,6 +636,7 @@ pub struct GatewayManager {
     token: SecretString,
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
+    cmd_rx: mpsc::Receiver<GatewayCommand>,
     gateway_url: String,
     session: Option<SessionInfo>,
     backoff_secs: u64,
@@ -565,11 +658,13 @@ impl GatewayManager {
         token: SecretString,
         config: DiscordConfig,
         event_tx: mpsc::Sender<GatewayEvent>,
+        cmd_rx: mpsc::Receiver<GatewayCommand>,
     ) -> Self {
         Self {
             token,
             config,
             event_tx,
+            cmd_rx,
             gateway_url: GATEWAY_URL.to_string(),
             session: None,
             backoff_secs: INITIAL_BACKOFF_SECS,
@@ -602,7 +697,7 @@ impl GatewayManager {
                             .clone()
                             .unwrap_or_else(|| self.gateway_url.clone()),
                     );
-                    conn.resume(session_id, seq).await
+                    conn.resume(session_id, seq, &mut self.cmd_rx).await
                 } else {
                     // No valid session info, do fresh connect
                     self.fresh_connect().await
@@ -653,7 +748,7 @@ impl GatewayManager {
         }
     }
 
-    async fn fresh_connect(&self) -> Result<SessionInfo> {
+    async fn fresh_connect(&mut self) -> Result<SessionInfo> {
         tracing::info!("Starting fresh gateway connection");
         let conn = GatewayConnection::new(
             self.token.clone(),
@@ -661,7 +756,7 @@ impl GatewayManager {
             self.event_tx.clone(),
         )
         .with_url(self.gateway_url.clone());
-        conn.run().await
+        conn.run(&mut self.cmd_rx).await
     }
 
     fn determine_reconnect_action(&self) -> ReconnectAction {
@@ -819,6 +914,113 @@ mod tests {
         let payload = build_heartbeat_payload(None);
         assert_eq!(payload["op"], 1);
         assert!(payload["d"].is_null());
+    }
+
+    #[test]
+    fn lazy_request_payload_has_correct_structure() {
+        let payload = build_lazy_request_payload(123, &[456]);
+        assert_eq!(payload["op"], 14);
+        assert_eq!(payload["d"]["guild_id"], "123");
+        // Channel should have a member list range
+        let range = &payload["d"]["channels"]["456"];
+        assert!(range.is_array(), "Channel should have ranges array");
+        assert_eq!(range[0][0], 0);
+        assert_eq!(range[0][1], 99);
+    }
+
+    #[test]
+    fn lazy_request_payload_multiple_channels() {
+        let payload = build_lazy_request_payload(123, &[456, 789]);
+        assert_eq!(payload["op"], 14);
+        assert_eq!(payload["d"]["guild_id"], "123");
+        assert!(payload["d"]["channels"]["456"].is_array());
+        assert!(payload["d"]["channels"]["789"].is_array());
+    }
+
+    #[test]
+    fn lazy_request_payload_includes_subscription_fields() {
+        let payload = build_lazy_request_payload(123, &[456]);
+        let d = &payload["d"];
+
+        // These fields are required for Discord to fully activate the subscription
+        // and deliver MESSAGE_CREATE events, especially for large guilds.
+        assert_eq!(
+            d["typing"], true,
+            "typing must be true for full subscription"
+        );
+        assert_eq!(d["threads"], true, "threads must be true for thread events");
+        assert_eq!(
+            d["activities"], true,
+            "activities must be true for presence"
+        );
+        assert!(d["members"].is_array(), "members must be an empty array");
+        assert_eq!(d["members"].as_array().unwrap().len(), 0);
+        assert!(
+            d["thread_member_lists"].is_array(),
+            "thread_member_lists must be an empty array"
+        );
+        assert_eq!(d["thread_member_lists"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn identify_payload_includes_capabilities() {
+        let config = DiscordConfig {
+            client_build_number: 346892,
+            browser_version: "131.0.0.0".to_string(),
+            browser_user_agent: "Mozilla/5.0 Test".to_string(),
+        };
+        let payload = build_identify_payload("test_token", &config);
+        let d = &payload["d"];
+
+        // capabilities bitmask tells Discord what events the client can handle.
+        // Without this, large guilds don't deliver MESSAGE_CREATE events.
+        assert!(
+            d["capabilities"].is_number(),
+            "IDENTIFY must include capabilities bitmask"
+        );
+        let caps = d["capabilities"].as_u64().unwrap();
+        assert!(caps > 0, "capabilities must be non-zero");
+    }
+
+    #[test]
+    fn identify_payload_includes_client_state() {
+        let config = DiscordConfig {
+            client_build_number: 346892,
+            browser_version: "131.0.0.0".to_string(),
+            browser_user_agent: "Mozilla/5.0 Test".to_string(),
+        };
+        let payload = build_identify_payload("test_token", &config);
+        let cs = &payload["d"]["client_state"];
+
+        assert!(cs.is_object(), "IDENTIFY must include client_state object");
+        assert!(
+            cs["guild_versions"].is_object(),
+            "client_state must have guild_versions"
+        );
+        assert!(
+            cs["highest_last_message_id"].is_string(),
+            "client_state must have highest_last_message_id"
+        );
+        assert!(
+            cs["read_state_version"].is_number(),
+            "client_state must have read_state_version"
+        );
+    }
+
+    #[test]
+    fn identify_payload_includes_presence() {
+        let config = DiscordConfig {
+            client_build_number: 346892,
+            browser_version: "131.0.0.0".to_string(),
+            browser_user_agent: "Mozilla/5.0 Test".to_string(),
+        };
+        let payload = build_identify_payload("test_token", &config);
+        let p = &payload["d"]["presence"];
+
+        assert!(p.is_object(), "IDENTIFY must include presence object");
+        assert_eq!(p["status"], "online");
+        assert!(p["activities"].is_array());
+        assert_eq!(p["afk"], false);
     }
 
     #[test]
@@ -1000,11 +1202,12 @@ mod tests {
 
         // Connect gateway client
         let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
-        let gateway_handle = tokio::spawn(async move { gateway.run().await });
+        let gateway_handle = tokio::spawn(async move { gateway.run(&mut cmd_rx).await });
 
         // Collect events with timeout
         let mut events = Vec::new();
@@ -1116,11 +1319,13 @@ mod tests {
         });
 
         let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
-        let gateway_handle = tokio::spawn(async move { gateway.resume("old_session", 42).await });
+        let gateway_handle =
+            tokio::spawn(async move { gateway.resume("old_session", 42, &mut cmd_rx).await });
 
         // Collect events
         let mut events = Vec::new();
@@ -1164,8 +1369,9 @@ mod tests {
     #[test]
     fn gateway_manager_initial_state() {
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         assert!(manager.session().is_none());
         assert_eq!(manager.backoff_secs(), INITIAL_BACKOFF_SECS);
@@ -1174,8 +1380,9 @@ mod tests {
     #[test]
     fn gateway_manager_reconnect_action_no_session() {
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         let action = manager.determine_reconnect_action();
         assert_eq!(action, ReconnectAction::Reconnect);
@@ -1184,8 +1391,10 @@ mod tests {
     #[test]
     fn gateway_manager_reconnect_action_with_session() {
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let mut manager =
+            GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         manager.set_session(SessionInfo {
             session_id: Some("test_session".to_string()),
@@ -1201,8 +1410,9 @@ mod tests {
     #[test]
     fn gateway_manager_reconnect_action_stop_when_channel_closed() {
         let (event_tx, event_rx) = mpsc::channel::<GatewayEvent>(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let manager = GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         // Drop the receiver to close the channel
         drop(event_rx);
@@ -1214,8 +1424,10 @@ mod tests {
     #[test]
     fn gateway_manager_stop_takes_priority_over_resume() {
         let (event_tx, event_rx) = mpsc::channel::<GatewayEvent>(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let mut manager =
+            GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         // Set a valid session that would normally trigger Resume
         manager.set_session(SessionInfo {
@@ -1235,8 +1447,10 @@ mod tests {
     #[test]
     fn gateway_manager_reset_backoff() {
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let mut manager =
+            GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         // Simulate backoff growth
         manager.backoff_secs = 16;
@@ -1247,8 +1461,10 @@ mod tests {
     #[test]
     fn gateway_manager_session_info_incomplete_forces_reconnect() {
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
-        let mut manager = GatewayManager::new(SecretString::from("token"), config, event_tx);
+        let mut manager =
+            GatewayManager::new(SecretString::from("token"), config, event_tx, cmd_rx);
 
         // Session without sequence number
         manager.set_session(SessionInfo {
@@ -1297,11 +1513,12 @@ mod tests {
         });
 
         let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
-        let session = gateway.run().await.unwrap();
+        let session = gateway.run(&mut cmd_rx).await.unwrap();
 
         // C4 fix: session_id should be None after InvalidSession(false)
         assert!(
@@ -1376,11 +1593,12 @@ mod tests {
         });
 
         let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
-        let session = gateway.run().await.unwrap();
+        let session = gateway.run(&mut cmd_rx).await.unwrap();
 
         let mut events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
@@ -1434,11 +1652,15 @@ mod tests {
         });
 
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(url);
 
-        let session = gateway.resume("old_session", 42).await.unwrap();
+        let session = gateway
+            .resume("old_session", 42, &mut cmd_rx)
+            .await
+            .unwrap();
         let _ = server.await;
 
         // C3 fix: resume_url should be preserved from the connection URL
@@ -1490,11 +1712,12 @@ mod tests {
         });
 
         let (event_tx, _event_rx) = mpsc::channel(256);
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
         let config = DiscordConfig::default();
         let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
             .with_url(format!("ws://{}", addr));
 
-        let session = gateway.run().await.unwrap();
+        let session = gateway.run(&mut cmd_rx).await.unwrap();
         let _ = server.await;
 
         // C4 fix: even though READY set session_id, InvalidSession(false) should clear it
@@ -1503,5 +1726,107 @@ mod tests {
             "session_id should be None after InvalidSession(false), but was {:?}",
             session.session_id
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_sends_lazy_request_on_subscribe_command() {
+        use crate::domain::types::Id;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: send HELLO, read IDENTIFY, send READY, then read the lazy request
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut write, mut read) = ws.split();
+
+            // Send HELLO
+            let hello = serde_json::json!({"op": 10, "d": {"heartbeat_interval": 45000}});
+            write
+                .send(Message::Text(hello.to_string().into()))
+                .await
+                .unwrap();
+
+            // Read IDENTIFY
+            let _ = read.next().await;
+
+            // Send READY
+            let ready = serde_json::json!({
+                "op": 0, "t": "READY", "s": 1,
+                "d": {
+                    "session_id": "sess",
+                    "resume_gateway_url": "wss://resume.test",
+                    "guilds": [], "private_channels": [],
+                    "user": {"id": "1", "username": "test"},
+                    "read_state": [], "relationships": []
+                }
+            });
+            write
+                .send(Message::Text(ready.to_string().into()))
+                .await
+                .unwrap();
+
+            // Read the next message — should be the lazy request (op 14)
+            if let Some(Ok(msg)) = read.next().await {
+                let text = msg.into_text().unwrap();
+                let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    payload["op"], 14,
+                    "Expected lazy request op 14, got {}",
+                    payload["op"]
+                );
+                assert_eq!(payload["d"]["guild_id"], "123");
+                assert!(payload["d"]["channels"]["456"].is_array());
+                return true;
+            }
+            false
+        });
+
+        let (event_tx, mut event_rx) = mpsc::channel(256);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<GatewayCommand>(16);
+        let config = DiscordConfig::default();
+        let gateway = GatewayConnection::new(SecretString::from("test_token"), config, event_tx)
+            .with_url(format!("ws://{}", addr));
+
+        let gateway_handle = tokio::spawn(async move { gateway.run(&mut cmd_rx).await });
+
+        // Wait for READY event
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    if let Some(GatewayEvent::Ready(_)) = event {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("Timed out waiting for READY");
+                }
+            }
+        }
+
+        // Send a subscribe command
+        cmd_tx
+            .send(GatewayCommand::Subscribe {
+                guild_id: Id::new(123),
+                channels: vec![Id::new(456)],
+            })
+            .await
+            .unwrap();
+
+        // Wait for server to verify the lazy request
+        let server_got_lazy_request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            server_got_lazy_request,
+            "Server should have received the lazy request"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), gateway_handle).await;
     }
 }

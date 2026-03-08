@@ -10,8 +10,7 @@ use crate::app::AppState;
 use crate::domain::event::GatewayEvent;
 use crate::domain::types::{
     BackgroundResult, CachedChannel, CachedGuild, CachedMessage, CachedRole, CachedUser,
-    ConnectionState, DbRequest, Id, MessageAttachment, MessageEmbed,
-    MessageReference, RoleMarker,
+    ConnectionState, DbRequest, Id, MessageAttachment, MessageEmbed, MessageReference, RoleMarker,
 };
 
 /// Process a gateway event, update app state and cache. Returns true if dirty.
@@ -36,14 +35,9 @@ pub fn handle_gateway_event(
                     Id::new(uid),
                     CachedUser {
                         id: Id::new(uid),
-                        name: ready.user["username"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
+                        name: ready.user["username"].as_str().unwrap_or("").to_string(),
                         discriminator: None,
-                        display_name: ready.user["global_name"]
-                            .as_str()
-                            .map(String::from),
+                        display_name: ready.user["global_name"].as_str().map(String::from),
                         avatar: ready.user["avatar"].as_str().map(String::from),
                     },
                 );
@@ -143,24 +137,30 @@ pub fn handle_gateway_event(
 
         GatewayEvent::GuildCreate(guild) => {
             let roles = parse_roles_json(&guild.roles);
+
+            // Parse channel_order up front so insert_guild gets the full list
+            // and doesn't wipe channel_guild entries during stale cleanup.
+            let channel_order: Vec<Id<crate::domain::types::ChannelMarker>> = guild
+                .channels
+                .iter()
+                .filter_map(|ch| parse_id(&ch["id"]).map(Id::new))
+                .collect();
+
             let cached_guild = CachedGuild {
                 id: guild.id,
                 name: guild.name.clone(),
-                icon: guild.raw["icon"].as_str().map(String::from),
-                channel_order: vec![],
+                icon: guild.raw["icon"]
+                    .as_str()
+                    .or_else(|| guild.raw["properties"]["icon"].as_str())
+                    .map(String::from),
+                channel_order,
                 roles,
             };
             state.cache.insert_guild(cached_guild);
 
             for ch_json in &guild.channels {
                 if let Some(channel) = parse_channel_json(ch_json) {
-                    let ch_id = channel.id;
                     state.cache.insert_channel(channel);
-                    if let Some(g) = state.cache.guilds.get_mut(&guild.id) {
-                        if !g.channel_order.contains(&ch_id) {
-                            g.channel_order.push(ch_id);
-                        }
-                    }
                 }
             }
             true
@@ -223,9 +223,9 @@ pub fn handle_gateway_event(
         }
 
         // Hello and HeartbeatAck are handled internally by GatewayConnection
-        GatewayEvent::Hello { .. }
-        | GatewayEvent::HeartbeatAck
-        | GatewayEvent::Unknown { .. } => false,
+        GatewayEvent::Hello { .. } | GatewayEvent::HeartbeatAck | GatewayEvent::Unknown { .. } => {
+            false
+        }
     }
 }
 
@@ -236,7 +236,7 @@ pub fn handle_background_result(result: BackgroundResult, state: &mut AppState) 
             channel_id,
             messages,
         } => {
-            state.cache.prepend_messages(channel_id, messages);
+            state.cache.replace_messages(channel_id, messages);
             true
         }
         BackgroundResult::CachedMessages {
@@ -283,8 +283,17 @@ fn parse_id(val: &serde_json::Value) -> Option<u64> {
 
 fn parse_guild_json(json: &serde_json::Value) -> Option<CachedGuild> {
     let id = parse_id(&json["id"])?;
-    let name = json["name"].as_str().unwrap_or("").to_string();
-    let icon = json["icon"].as_str().map(String::from);
+    // With `capabilities` in IDENTIFY, Discord wraps guild metadata under `properties`
+    let props = &json["properties"];
+    let name = json["name"]
+        .as_str()
+        .or_else(|| props["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let icon = json["icon"]
+        .as_str()
+        .or_else(|| props["icon"].as_str())
+        .map(String::from);
 
     let roles = json["roles"]
         .as_array()
@@ -397,9 +406,7 @@ fn parse_embeds_json(raw: &serde_json::Value) -> Vec<MessageEmbed> {
         .map(|arr| {
             arr.iter()
                 .map(|e| MessageEmbed {
-                    title: e["title"]
-                        .as_str()
-                        .map(std::string::ToString::to_string),
+                    title: e["title"].as_str().map(std::string::ToString::to_string),
                     description: e["description"]
                         .as_str()
                         .map(std::string::ToString::to_string),
@@ -461,15 +468,11 @@ mod tests {
             resume_gateway_url: "wss://resume.test".to_string(),
             guilds: vec![],
             private_channels: vec![],
-            read_state: vec![],
-            relationships: vec![],
+            read_state: serde_json::Value::Null,
+            relationships: serde_json::Value::Null,
             user: serde_json::json!({"id": "42", "username": "testuser"}),
         };
-        let dirty = handle_gateway_event(
-            GatewayEvent::Ready(Box::new(ready)),
-            &mut state,
-            &db_tx,
-        );
+        let dirty = handle_gateway_event(GatewayEvent::Ready(Box::new(ready)), &mut state, &db_tx);
         assert!(dirty);
         assert!(matches!(
             state.connection,
@@ -499,15 +502,11 @@ mod tests {
                 "type": 1,
                 "recipients": [{"id": "50", "username": "friend"}]
             })],
-            read_state: vec![],
-            relationships: vec![],
+            read_state: serde_json::Value::Null,
+            relationships: serde_json::Value::Null,
             user: serde_json::json!({"id": "42", "username": "me"}),
         };
-        handle_gateway_event(
-            GatewayEvent::Ready(Box::new(ready)),
-            &mut state,
-            &db_tx,
-        );
+        handle_gateway_event(GatewayEvent::Ready(Box::new(ready)), &mut state, &db_tx);
 
         assert!(state.cache.guilds.contains_key(&Id::new(1)));
         assert!(state.cache.channels.contains_key(&Id::new(10)));
@@ -618,12 +617,7 @@ mod tests {
             &db_tx,
         );
         assert!(dirty);
-        assert!(state
-            .cache
-            .messages
-            .get(&Id::new(10))
-            .unwrap()
-            .is_empty());
+        assert!(state.cache.messages.get(&Id::new(10)).unwrap().is_empty());
     }
 
     #[test]
@@ -731,10 +725,7 @@ mod tests {
             &mut state,
         );
         assert!(dirty);
-        assert_eq!(
-            state.cache.messages.get(&Id::new(10)).unwrap().len(),
-            1
-        );
+        assert_eq!(state.cache.messages.get(&Id::new(10)).unwrap().len(), 1);
     }
 
     #[test]
@@ -779,10 +770,7 @@ mod tests {
         );
         // Should NOT insert because channel already has messages
         assert!(!dirty);
-        assert_eq!(
-            state.cache.messages.get(&Id::new(10)).unwrap().len(),
-            1
-        );
+        assert_eq!(state.cache.messages.get(&Id::new(10)).unwrap().len(), 1);
     }
 
     #[test]
@@ -812,6 +800,26 @@ mod tests {
         assert_eq!(guild.id, Id::new(123));
         assert_eq!(guild.name, "Test Guild");
         assert_eq!(guild.channel_order.len(), 2);
+    }
+
+    #[test]
+    fn parse_guild_json_with_properties_wrapper() {
+        // When capabilities bitmask is set in IDENTIFY, Discord wraps
+        // guild metadata (name, icon) inside a `properties` object.
+        let json = serde_json::json!({
+            "id": "456",
+            "properties": {
+                "name": "Properties Guild",
+                "icon": "def789"
+            },
+            "roles": [],
+            "channels": [{"id": "30"}]
+        });
+        let guild = parse_guild_json(&json).unwrap();
+        assert_eq!(guild.id, Id::new(456));
+        assert_eq!(guild.name, "Properties Guild");
+        assert_eq!(guild.icon, Some("def789".to_string()));
+        assert_eq!(guild.channel_order.len(), 1);
     }
 
     #[test]
@@ -852,5 +860,203 @@ mod tests {
         assert_eq!(channel_type_from_u8(2), ChannelType::GuildVoice);
         assert_eq!(channel_type_from_u8(4), ChannelType::GuildCategory);
         assert_eq!(channel_type_from_u8(255), ChannelType::GuildText); // fallback
+    }
+
+    #[test]
+    fn messages_fetched_does_not_duplicate_on_revisit() {
+        let mut state = test_state();
+        let channel_id = Id::new(10);
+
+        // First fetch: 3 messages arrive
+        let msgs = vec![
+            CachedMessage {
+                id: Id::new(1),
+                channel_id,
+                author_id: Id::new(42),
+                content: "first".to_string(),
+                timestamp: "2024-01-01T00:00:00Z".to_string(),
+                edited_timestamp: None,
+                attachments: vec![],
+                embeds: vec![],
+                message_reference: None,
+                mention_everyone: false,
+                mentions: vec![],
+                rendered: None,
+            },
+            CachedMessage {
+                id: Id::new(2),
+                channel_id,
+                author_id: Id::new(42),
+                content: "second".to_string(),
+                timestamp: "2024-01-01T00:01:00Z".to_string(),
+                edited_timestamp: None,
+                attachments: vec![],
+                embeds: vec![],
+                message_reference: None,
+                mention_everyone: false,
+                mentions: vec![],
+                rendered: None,
+            },
+            CachedMessage {
+                id: Id::new(3),
+                channel_id,
+                author_id: Id::new(42),
+                content: "third".to_string(),
+                timestamp: "2024-01-01T00:02:00Z".to_string(),
+                edited_timestamp: None,
+                attachments: vec![],
+                embeds: vec![],
+                message_reference: None,
+                mention_everyone: false,
+                mentions: vec![],
+                rendered: None,
+            },
+        ];
+        handle_background_result(
+            BackgroundResult::MessagesFetched {
+                channel_id,
+                messages: msgs.clone(),
+            },
+            &mut state,
+        );
+        assert_eq!(state.cache.messages.get(&channel_id).unwrap().len(), 3);
+
+        // Second fetch (user revisited channel): same messages fetched again
+        handle_background_result(
+            BackgroundResult::MessagesFetched {
+                channel_id,
+                messages: msgs,
+            },
+            &mut state,
+        );
+
+        // Should NOT have duplicates — still exactly 3 messages
+        let deque = state.cache.messages.get(&channel_id).unwrap();
+        assert_eq!(
+            deque.len(),
+            3,
+            "Expected 3 messages but got {} (duplicates!)",
+            deque.len()
+        );
+        // Messages should be in chronological order (oldest first)
+        assert_eq!(deque[0].id, Id::new(1));
+        assert_eq!(deque[1].id, Id::new(2));
+        assert_eq!(deque[2].id, Id::new(3));
+    }
+
+    #[test]
+    fn messages_fetched_preserves_gateway_messages() {
+        let mut state = test_state();
+        let channel_id = Id::new(10);
+
+        // Simulate: gateway delivered a message while HTTP fetch was in flight
+        state.cache.insert_message(CachedMessage {
+            id: Id::new(100),
+            channel_id,
+            author_id: Id::new(42),
+            content: "gateway msg".to_string(),
+            timestamp: "2024-01-01T01:00:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![],
+            embeds: vec![],
+            message_reference: None,
+            mention_everyone: false,
+            mentions: vec![],
+            rendered: None,
+        });
+
+        // HTTP fetch returns older messages (doesn't include the gateway msg)
+        let msgs = vec![CachedMessage {
+            id: Id::new(1),
+            channel_id,
+            author_id: Id::new(42),
+            content: "old msg".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![],
+            embeds: vec![],
+            message_reference: None,
+            mention_everyone: false,
+            mentions: vec![],
+            rendered: None,
+        }];
+        handle_background_result(
+            BackgroundResult::MessagesFetched {
+                channel_id,
+                messages: msgs,
+            },
+            &mut state,
+        );
+
+        let deque = state.cache.messages.get(&channel_id).unwrap();
+        // Should have both: the fetched message AND the gateway message
+        assert_eq!(deque.len(), 2, "Should preserve gateway messages");
+        assert_eq!(deque[0].id, Id::new(1)); // fetched (older)
+        assert_eq!(deque[1].id, Id::new(100)); // gateway (newer)
+    }
+
+    #[test]
+    fn guild_create_preserves_channel_guild_mapping() {
+        let mut state = test_state();
+        let (db_tx, _db_rx) = make_db_tx();
+
+        // Simulate READY: guild with channels
+        let ready = ReadyEvent {
+            session_id: "s".to_string(),
+            resume_gateway_url: "wss://r".to_string(),
+            guilds: vec![serde_json::json!({
+                "id": "1",
+                "name": "Test Server",
+                "channels": [
+                    {"id": "10", "name": "general", "type": 0, "position": 0, "guild_id": "1"},
+                    {"id": "20", "name": "random", "type": 0, "position": 1, "guild_id": "1"}
+                ],
+                "roles": []
+            })],
+            private_channels: vec![],
+            read_state: serde_json::Value::Null,
+            relationships: serde_json::Value::Null,
+            user: serde_json::json!({"id": "42", "username": "me"}),
+        };
+        handle_gateway_event(GatewayEvent::Ready(Box::new(ready)), &mut state, &db_tx);
+
+        // Verify channel_guild is populated
+        assert_eq!(
+            state.cache.channel_guild.get(&Id::new(10)),
+            Some(&Id::new(1))
+        );
+        assert_eq!(
+            state.cache.channel_guild.get(&Id::new(20)),
+            Some(&Id::new(1))
+        );
+
+        // Simulate GUILD_CREATE (arrives after READY with full guild data)
+        let guild = GuildCreateEvent {
+            id: Id::new(1),
+            name: "Test Server".to_string(),
+            channels: vec![
+                serde_json::json!({"id": "10", "name": "general", "type": 0, "position": 0, "guild_id": "1"}),
+                serde_json::json!({"id": "20", "name": "random", "type": 0, "position": 1, "guild_id": "1"}),
+            ],
+            roles: vec![],
+            raw: serde_json::json!({}),
+        };
+        handle_gateway_event(
+            GatewayEvent::GuildCreate(Box::new(guild)),
+            &mut state,
+            &db_tx,
+        );
+
+        // channel_guild entries must still be intact after GUILD_CREATE
+        assert_eq!(
+            state.cache.channel_guild.get(&Id::new(10)),
+            Some(&Id::new(1)),
+            "channel_guild lost entry for channel 10 after GuildCreate"
+        );
+        assert_eq!(
+            state.cache.channel_guild.get(&Id::new(20)),
+            Some(&Id::new(1)),
+            "channel_guild lost entry for channel 20 after GuildCreate"
+        );
     }
 }

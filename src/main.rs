@@ -10,7 +10,9 @@ use tokio::sync::mpsc;
 use discordinator::app::App;
 use discordinator::config::{AppConfig, AppDirs};
 use discordinator::domain::event::GatewayEvent;
-use discordinator::domain::types::{BackgroundResult, ConnectionState, DbRequest, HttpRequest};
+use discordinator::domain::types::{
+    BackgroundResult, ConnectionState, DbRequest, GatewayCommand, HttpRequest,
+};
 use discordinator::infrastructure::gateway::GatewayManager;
 use discordinator::infrastructure::http_client::HttpActor;
 use discordinator::infrastructure::keyring::KeyringStore;
@@ -37,28 +39,48 @@ async fn main() -> Result<()> {
     result
 }
 
+/// What `run_app` decided when it returned.
+enum RunResult {
+    /// User pressed Ctrl+Q — exit the application.
+    Quit,
+    /// Connection timed out or user pressed Esc — go back to login.
+    ReturnToLogin,
+}
+
 async fn run(terminal: &mut Term, config: AppConfig) -> Result<()> {
     let keyring = KeyringStore;
     let env_getter = |key: &str| -> Option<String> { std::env::var(key).ok() };
 
-    let token = match discordinator::auth::retrieve_token(&config.auth, &keyring, &env_getter)? {
-        Some(t) => t,
-        None => match login_loop(terminal, &config, &keyring).await? {
-            Some(t) => SecretString::from(t),
-            None => return Ok(()),
-        },
-    };
+    let mut token =
+        match discordinator::auth::retrieve_token(&config.auth, &keyring, &env_getter)? {
+            Some(t) => t,
+            None => match login_loop(terminal, &config, &keyring).await? {
+                Some(t) => SecretString::from(t),
+                None => return Ok(()),
+            },
+        };
 
-    run_app(terminal, config, token).await
+    loop {
+        match run_app(terminal, config.clone(), token.clone()).await? {
+            RunResult::Quit => return Ok(()),
+            RunResult::ReturnToLogin => {
+                match login_loop(terminal, &config, &keyring).await? {
+                    Some(t) => token = SecretString::from(t),
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
 }
 
 // === Async Event Loop ===
 
-async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) -> Result<()> {
+async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) -> Result<RunResult> {
     let dirs = AppDirs::new()?;
 
     // Create channels
     let (gateway_tx, mut gateway_rx) = mpsc::channel::<GatewayEvent>(256);
+    let (gw_cmd_tx, gw_cmd_rx) = mpsc::channel::<GatewayCommand>(64);
     let (http_tx, http_rx) = mpsc::channel::<HttpRequest>(64);
     let (db_tx, db_rx) = mpsc::channel::<DbRequest>(64);
     let (bg_tx, mut bg_rx) = mpsc::channel::<BackgroundResult>(64);
@@ -67,7 +89,7 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     let gw_token = token.clone();
     let gw_config = config.discord.clone();
     tokio::spawn(async move {
-        let mut manager = GatewayManager::new(gw_token, gw_config, gateway_tx);
+        let mut manager = GatewayManager::new(gw_token, gw_config, gateway_tx, gw_cmd_rx);
         if let Err(e) = manager.run().await {
             tracing::error!("Gateway manager error: {}", e);
         }
@@ -93,6 +115,16 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     let mut render_interval = tokio::time::interval(Duration::from_millis(16));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Periodic re-subscription for all open panes (prevents Discord from dropping
+    // idle lazy guild subscriptions for non-focused panes)
+    let mut resub_interval = tokio::time::interval(Duration::from_secs(30));
+    resub_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Connection timeout: if we don't reach Connected within 30s, bail out
+    let connect_deadline = tokio::time::sleep(Duration::from_secs(30));
+    tokio::pin!(connect_deadline);
+    let mut connected = false;
+
     loop {
         tokio::select! {
             biased;
@@ -101,6 +133,9 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
                 app.dirty |= discordinator::event_handler::handle_gateway_event(
                     event, &mut app.state, &db_tx,
                 );
+                if !connected && matches!(app.state.connection, ConnectionState::Connected { .. }) {
+                    connected = true;
+                }
             }
 
             Some(result) = bg_rx.recv() => {
@@ -113,14 +148,26 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
                 if let Some(Ok(event)) = maybe_event {
                     match event {
                         Event::Key(key) => {
+                            // Allow Esc to return to login during connection phase
+                            if !connected && key.code == KeyCode::Esc {
+                                return Ok(RunResult::ReturnToLogin);
+                            }
                             app.dirty |= handle_key_with_dispatch(
-                                &mut app, key, &http_tx, &db_tx,
+                                &mut app, key, &http_tx, &db_tx, &gw_cmd_tx,
                             );
                         }
                         Event::Resize(_, _) => app.dirty = true,
                         _ => {}
                     }
                 }
+            }
+
+            () = &mut connect_deadline, if !connected => {
+                return Ok(RunResult::ReturnToLogin);
+            }
+
+            _ = resub_interval.tick() => {
+                subscribe_all_panes(&app.state, &gw_cmd_tx);
             }
 
             _ = render_interval.tick() => {
@@ -136,11 +183,9 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
         }
 
         if app.should_quit {
-            break;
+            return Ok(RunResult::Quit);
         }
     }
-
-    Ok(())
 }
 
 /// Handle a key event and dispatch side effects (HTTP/DB requests).
@@ -149,6 +194,7 @@ fn handle_key_with_dispatch(
     key: crossterm::event::KeyEvent,
     http_tx: &mpsc::Sender<HttpRequest>,
     db_tx: &mpsc::Sender<DbRequest>,
+    gw_cmd_tx: &mpsc::Sender<GatewayCommand>,
 ) -> bool {
     // Capture pre-action state for dispatch
     let pre_channel = app.state.focused_pane().channel_id;
@@ -204,7 +250,7 @@ fn handle_key_with_dispatch(
         }
     }
 
-    // SwitchChannel → fetch messages
+    // SwitchChannel → fetch messages + subscribe to gateway events
     let post_channel = app.state.focused_pane().channel_id;
     if post_channel != pre_channel {
         if let Some(ch_id) = post_channel {
@@ -219,9 +265,25 @@ fn handle_key_with_dispatch(
                 limit: 50,
             });
         }
+
+        // Re-subscribe ALL open panes' guild/channels via op 14, not just the focused one.
+        // This ensures non-focused panes keep receiving MESSAGE_CREATE events.
+        subscribe_all_panes(&app.state, gw_cmd_tx);
     }
 
     dirty
+}
+
+/// Send op 14 (Lazy Request) for all unique guild/channel pairs across all open panes.
+/// This keeps subscriptions active for every visible channel, not just the focused one.
+fn subscribe_all_panes(
+    state: &discordinator::app::AppState,
+    gw_cmd_tx: &mpsc::Sender<GatewayCommand>,
+) {
+    let subs = state.pane_manager.root.active_guild_channels();
+    for (guild_id, channels) in subs {
+        let _ = gw_cmd_tx.try_send(GatewayCommand::Subscribe { guild_id, channels });
+    }
 }
 
 fn generate_nonce() -> String {
@@ -279,23 +341,17 @@ fn handle_db_request(
             channel_id,
             before_timestamp,
             limit,
-        } => db::fetch_messages(conn, channel_id, before_timestamp.as_deref(), limit).map(
-            |msgs| {
-                Some(BackgroundResult::CachedMessages {
-                    channel_id,
-                    messages: msgs,
-                })
-            },
-        ),
+        } => db::fetch_messages(conn, channel_id, before_timestamp.as_deref(), limit).map(|msgs| {
+            Some(BackgroundResult::CachedMessages {
+                channel_id,
+                messages: msgs,
+            })
+        }),
         DbRequest::SaveSession { name, layout_json } => {
             db::save_session(conn, &name, &layout_json).map(|()| None)
         }
-        DbRequest::LoadSession { name } => db::load_session(conn, &name).map(|layout_json| {
-            Some(BackgroundResult::SessionLoaded {
-                name,
-                layout_json,
-            })
-        }),
+        DbRequest::LoadSession { name } => db::load_session(conn, &name)
+            .map(|layout_json| Some(BackgroundResult::SessionLoaded { name, layout_json })),
     };
 
     match result {
@@ -385,8 +441,7 @@ async fn login_loop(
                             state.status = LoginStatus::Validating;
                         }
                         Err(e) => {
-                            state.status =
-                                LoginStatus::Error(format!("QR init failed: {e}"));
+                            state.status = LoginStatus::Error(format!("QR init failed: {e}"));
                         }
                     }
                 }
@@ -509,9 +564,7 @@ async fn handle_login_submit(
 // === QR Code Authentication ===
 
 /// Start QR code authentication. Returns a receiver for the result and QR lines for display.
-fn start_qr_auth(
-    config: &AppConfig,
-) -> Result<(mpsc::Receiver<Result<String>>, Vec<String>)> {
+fn start_qr_auth(config: &AppConfig) -> Result<(mpsc::Receiver<Result<String>>, Vec<String>)> {
     let session = discordinator::auth::QrAuthSession::new()?;
     let qr_lines = session.generate_qr_lines()?;
 
@@ -636,8 +689,7 @@ async fn exchange_qr_ticket(
     ticket: &str,
     config: &discordinator::config::DiscordConfig,
 ) -> Result<String> {
-    let super_props =
-        discordinator::infrastructure::anti_detection::build_super_properties(config);
+    let super_props = discordinator::infrastructure::anti_detection::build_super_properties(config);
 
     let client = reqwest::Client::new();
     let response = client
