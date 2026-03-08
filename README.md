@@ -4,6 +4,12 @@ A Discord TUI (Terminal User Interface) client written in Rust with tmux-like sp
 
 > **Disclaimer**: Discordinator uses the Discord User API (the same interface as the official web/desktop client). This is against Discord's Terms of Service. Use at your own risk.
 
+
+<img width="2056" height="1290" alt="Screenshot 2026-03-08 at 22 22 18" src="https://github.com/user-attachments/assets/c0cdb64a-a337-498f-900a-9cfd8c238ad0" />
+
+
+
+
 ## Features
 
 - **tmux-style pane management** — Split your terminal into multiple independent channel views (horizontal/vertical), resize, zoom, and navigate between them
@@ -157,53 +163,6 @@ restore_on_start = true
 | Database | `~/.local/share/discordinator/messages.db` |
 | Logs | `~/.local/share/discordinator/logs/` |
 
-## Design Decisions
-
-### Why not use twilight-gateway / twilight-http?
-
-Discord's ecosystem crates like `twilight-gateway` and `twilight-http` are designed exclusively for **bot accounts**:
-
-- `twilight-gateway` hardcodes its IDENTIFY properties to `"twilight.rs"` and requires bot `Intents` — user accounts need browser-mimicking properties and don't use intents
-- `twilight-http` prepends `Bot ` to the Authorization header — user tokens must be sent without any prefix
-- Bot READY payloads differ from user READY payloads (missing `private_channels`, `read_states`, `relationships`, etc.)
-
-Discordinator uses **tokio-tungstenite** for WebSocket and **reqwest** for HTTP, with full control over headers and payloads. Only **twilight-model** is used, for its type-safe Discord data structures (`Id<T>`, `Message`, `Channel`, `Guild`, etc.).
-
-### Clean Architecture
-
-The codebase follows a layered architecture where dependencies only point inward:
-
-```
-Presentation (src/ui/)        — ratatui widgets, layout, input handling
-Application  (src/app.rs)     — event loop, action dispatcher, state management
-Domain       (src/domain/)    — pure types and business logic, no I/O
-Infrastructure (src/infrastructure/) — gateway, HTTP, SQLite, keyring
-```
-
-### Single-owner state with channel-based I/O
-
-All mutable state lives in `AppState`, owned exclusively by the main event loop. There are no `Arc<Mutex<_>>` wrappers. Background tasks (gateway, HTTP, SQLite) communicate with the main loop through `mpsc` channels. This eliminates data races by design and keeps the mental model simple.
-
-### Action-based state mutation
-
-Every state change goes through a single `apply_action()` function that takes an `Action` enum variant. Input handlers, gateway events, and background results all produce `Action` values — they never mutate state directly. This makes the application testable (fire actions, assert resulting state) and debuggable (log all actions).
-
-### Binary tree pane layout
-
-Panes are stored as a binary tree (`PaneNode::Leaf | PaneNode::Split`), the same model tmux uses. Splitting a pane replaces the leaf with a split node containing two new leaves. Closing a pane collapses the parent split and promotes the sibling. This gives O(log n) operations for typical pane counts (2-8).
-
-### Dirty flag rendering
-
-The UI only re-renders when something actually changed. A `dirty` flag is set on any state mutation and cleared after each render pass. Combined with biased `tokio::select!` polling (gateway events have priority over render ticks), this ensures messages are never dropped while keeping CPU usage low at idle.
-
-### Anti-detection by default
-
-All Discord API communication mimics the official web client:
-- Gateway IDENTIFY sends browser-like properties (configurable `client_build_number`, `browser_version`, `User-Agent`)
-- HTTP requests include `X-Super-Properties`, `User-Agent`, and `X-Discord-Locale` headers
-- Request timing includes 50-150ms random jitter to avoid machine-like patterns
-- DM channels are only read from the READY event — `POST /users/@me/channels` is never called (this specific endpoint is known to trigger bans)
-
 ## Development
 
 ```bash
@@ -216,7 +175,7 @@ cargo fmt --check                     # Check formatting
 RUST_LOG=debug cargo run              # Run with debug logging
 ```
 
-All commands must be run inside `nix develop`. The Nix flake provides the Rust toolchain, system libraries, and all build dependencies.
+All commands can be run inside `nix develop`. The Nix flake provides the Rust toolchain, system libraries, and all build dependencies.
 
 ### Environment Variables
 
