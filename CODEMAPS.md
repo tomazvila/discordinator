@@ -1,6 +1,6 @@
 # CODEMAPS.md — Discordinator Codebase Map
 
-**35 source files, ~16,746 lines of Rust**
+**37 source files, ~20,883 lines of Rust**
 
 ## File Index
 
@@ -27,6 +27,7 @@
 | `src/domain/markdown.rs` | 68 | Domain | `MarkdownAst`, `MarkdownSpan`, `MarkdownStyle` data types |
 | `src/infrastructure/mod.rs` | 5 | Infra | Module declaration |
 | `src/infrastructure/anti_detection.rs` | 255 | Infra | Chrome-mimicking headers, `X-Super-Properties`, `IdentifyProperties` |
+| `src/infrastructure/discord_properties.rs` | 402 | Infra | Auto-fetch Discord client properties (build number, capabilities, browser version) from live web client |
 | `src/infrastructure/db.rs` | 525 | Infra | SQLite: messages, channels, guilds, sessions tables |
 | `src/infrastructure/gateway.rs` | 1407 | Infra | WebSocket gateway: `GatewayConnection`, `ZlibDecompressor`, `GatewayManager` with reconnect |
 | `src/infrastructure/http_client.rs` | 718 | Infra | `HttpActor` — REST API with per-route rate limiting |
@@ -158,6 +159,8 @@ main.rs
 │   ├── domain/types.rs (HttpRequest, CachedMessage)
 │   ├── infrastructure/anti_detection.rs (build_http_headers)
 │   └── config.rs (DiscordConfig)
+├── infrastructure/discord_properties.rs
+│   └── config.rs (DiscordConfig, for apply_fetched_properties)
 ├── infrastructure/db.rs
 │   └── domain/types.rs (CachedMessage, etc.)
 ├── ui/layout.rs

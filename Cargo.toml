@@ -20,8 +20,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 flate2 = "1"
 
-# Custom HTTP client (with anti-detection headers)
-reqwest = { version = "0.12", features = ["json", "native-tls"] }
+# Custom HTTP client with TLS fingerprint impersonation (Chrome)
+rquest = { version = "5.1", features = ["json", "cookies"] }
+rquest-util = "2.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -62,6 +63,7 @@ rand = "0.8"
 
 # Time
 chrono = "0.4"
+iana-time-zone = "0.1"
 
 # Futures
 futures-util = "0.3"

@@ -4,7 +4,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Modifier,
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Widget},
 };
 
@@ -99,26 +99,125 @@ fn render_leaf_pane(area: Rect, buf: &mut Buffer, state: &AppState, pane_id: Pan
     let message_area = Rect::new(inner.x, inner.y, inner.width, msg_height);
     let input_area = Rect::new(inner.x, inner.y + msg_height, inner.width, input_height);
 
-    // Render messages
-    let empty_deque = VecDeque::new();
-    let messages = pane
-        .channel_id
-        .and_then(|id| state.cache.messages.get(&id))
-        .unwrap_or(&empty_deque);
+    if pane.channel_id.is_some() {
+        // Render messages
+        let empty_deque = VecDeque::new();
+        let messages = pane
+            .channel_id
+            .and_then(|id| state.cache.messages.get(&id))
+            .unwrap_or(&empty_deque);
 
-    let msg_view = MessageView::new(
-        messages,
-        &pane.scroll,
-        pane.selected_message,
-        &state.theme,
-        &state.cache,
-    );
-    msg_view.render(message_area, buf);
+        let msg_view = MessageView::new(
+            messages,
+            &pane.scroll,
+            pane.selected_message,
+            &state.theme,
+            &state.cache,
+        );
+        msg_view.render(message_area, buf);
 
-    // Only render input box for focused pane
-    if is_focused {
-        let input = InputBox::from_parts(&pane.input, state.input_mode, &state.theme);
-        input.render(input_area, buf);
+        // Only render input box for focused pane
+        if is_focused {
+            let input = InputBox::from_parts(&pane.input, state.input_mode, &state.theme);
+            input.render(input_area, buf);
+        }
+    } else {
+        render_welcome(message_area, buf, state);
+    }
+}
+
+/// Render the welcome/help screen when no channel is selected.
+fn render_welcome(area: Rect, buf: &mut Buffer, state: &AppState) {
+    let bg = state.theme.base_style();
+    let dim = state.theme.dim_style();
+    let bold = ratatui::style::Style::default()
+        .fg(state.theme.sidebar_unread_fg)
+        .add_modifier(Modifier::BOLD);
+    let key_style = ratatui::style::Style::default().fg(state.theme.status_mode_fg);
+
+    // Fill background
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_char(' ').set_style(bg);
+        }
+    }
+
+    let help: Vec<Line<'_>> = vec![
+        Line::from(Span::styled("Discordinator", bold)),
+        Line::default(),
+        Line::from(Span::styled("Select a channel to start chatting.", dim)),
+        Line::default(),
+        Line::from(Span::styled("Navigation", bold)),
+        Line::from(vec![
+            Span::styled("  Ctrl+b s  ", key_style),
+            Span::styled("Open sidebar & browse servers", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  j / k     ", key_style),
+            Span::styled("Move selection up / down", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", key_style),
+            Span::styled("Select channel or toggle server", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc       ", key_style),
+            Span::styled("Return focus to pane", dim),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("Panes", bold)),
+        Line::from(vec![
+            Span::styled("  Ctrl+b \"  ", key_style),
+            Span::styled("Split horizontal", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+b %  ", key_style),
+            Span::styled("Split vertical", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+b o  ", key_style),
+            Span::styled("Cycle focus between panes", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+b x  ", key_style),
+            Span::styled("Close current pane", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+b z  ", key_style),
+            Span::styled("Toggle zoom (fullscreen pane)", dim),
+        ]),
+        Line::default(),
+        Line::from(Span::styled("Messaging", bold)),
+        Line::from(vec![
+            Span::styled("  i         ", key_style),
+            Span::styled("Start typing a message", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", key_style),
+            Span::styled("Send message (in insert mode)", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc       ", key_style),
+            Span::styled("Return to normal mode", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+q    ", key_style),
+            Span::styled("Quit", dim),
+        ]),
+    ];
+
+    // Center vertically
+    let start_y = area.y + area.height.saturating_sub(help.len() as u16) / 2;
+
+    for (i, line) in help.iter().enumerate() {
+        let y = start_y + i as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        // Center horizontally
+        let line_w = line.width() as u16;
+        let x = area.x + area.width.saturating_sub(line_w) / 2;
+        buf.set_line(x, y, line, area.width);
     }
 }
 

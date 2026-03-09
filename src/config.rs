@@ -69,6 +69,8 @@ pub struct DiscordConfig {
     pub browser_version: String,
     #[serde(default = "default_browser_user_agent")]
     pub browser_user_agent: String,
+    #[serde(default = "default_capabilities")]
+    pub capabilities: u64,
 }
 
 impl Default for DiscordConfig {
@@ -77,6 +79,28 @@ impl Default for DiscordConfig {
             client_build_number: default_client_build_number(),
             browser_version: default_browser_version(),
             browser_user_agent: default_browser_user_agent(),
+            capabilities: default_capabilities(),
+        }
+    }
+}
+
+impl DiscordConfig {
+    /// Apply auto-fetched properties, overriding defaults but not user-pinned config values.
+    pub fn apply_fetched_properties(
+        &mut self,
+        props: &crate::infrastructure::discord_properties::DiscordProperties,
+    ) {
+        // Always override build number — it goes stale fast
+        self.client_build_number = props.client_build_number;
+        self.capabilities = props.capabilities;
+        // Only override browser version/UA if they match the compiled-in defaults
+        // (meaning user hasn't customized them in config.toml)
+        if self.browser_version == default_browser_version() {
+            self.browser_version.clone_from(&props.browser_version);
+        }
+        if self.browser_user_agent == default_browser_user_agent() {
+            self.browser_user_agent
+                .clone_from(&props.browser_user_agent);
         }
     }
 }
@@ -171,6 +195,9 @@ fn default_browser_version() -> String {
 }
 fn default_browser_user_agent() -> String {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string()
+}
+fn default_capabilities() -> u64 {
+    30717
 }
 fn default_theme() -> String {
     "default".to_string()
@@ -468,9 +495,60 @@ client_build_number = 111111
     fn anti_detection_fields_present_in_discord_config() {
         let config = DiscordConfig::default();
         assert!(config.client_build_number > 0);
+        assert!(config.capabilities > 0);
         assert!(!config.browser_version.is_empty());
         assert!(config.browser_user_agent.contains("Mozilla"));
         assert!(config.browser_user_agent.contains("Chrome"));
+    }
+
+    #[test]
+    fn apply_fetched_properties_overrides_defaults() {
+        use crate::infrastructure::discord_properties::DiscordProperties;
+        use std::time::SystemTime;
+
+        let mut config = DiscordConfig::default();
+        let props = DiscordProperties {
+            client_build_number: 507104,
+            capabilities: 1734653,
+            browser_version: "146.0.7680.66".to_string(),
+            browser_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.66 Safari/537.36".to_string(),
+            fetched_at: SystemTime::now(),
+        };
+
+        config.apply_fetched_properties(&props);
+
+        assert_eq!(config.client_build_number, 507104);
+        assert_eq!(config.capabilities, 1734653);
+        assert_eq!(config.browser_version, "146.0.7680.66");
+        assert!(config.browser_user_agent.contains("146.0.7680.66"));
+    }
+
+    #[test]
+    fn apply_fetched_properties_preserves_user_customized_ua() {
+        use crate::infrastructure::discord_properties::DiscordProperties;
+        use std::time::SystemTime;
+
+        let mut config = DiscordConfig {
+            browser_user_agent: "MyCustomUA/1.0".to_string(),
+            browser_version: "99.0.0.0".to_string(),
+            ..Default::default()
+        };
+        let props = DiscordProperties {
+            client_build_number: 507104,
+            capabilities: 1734653,
+            browser_version: "146.0.7680.66".to_string(),
+            browser_user_agent: "autofetched".to_string(),
+            fetched_at: SystemTime::now(),
+        };
+
+        config.apply_fetched_properties(&props);
+
+        // Build number and capabilities always overridden
+        assert_eq!(config.client_build_number, 507104);
+        assert_eq!(config.capabilities, 1734653);
+        // User-customized values preserved
+        assert_eq!(config.browser_user_agent, "MyCustomUA/1.0");
+        assert_eq!(config.browser_version, "99.0.0.0");
     }
 }
 

@@ -219,6 +219,11 @@ impl DiscordCache {
     pub fn get_messages(&self, channel_id: Id<ChannelMarker>) -> Option<&VecDeque<CachedMessage>> {
         self.messages.get(&channel_id)
     }
+
+    /// Get the ID of the latest message in a channel (for read state acking).
+    pub fn last_message_id(&self, channel_id: Id<ChannelMarker>) -> Option<Id<MessageMarker>> {
+        self.messages.get(&channel_id)?.back().map(|m| m.id)
+    }
 }
 
 #[cfg(test)]

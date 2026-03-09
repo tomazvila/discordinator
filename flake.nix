@@ -27,6 +27,8 @@
             rustToolchain
             pkgs.pkg-config
             pkgs.cargo-deny
+            pkgs.cmake
+            pkgs.perl
           ];
 
           buildInputs = [

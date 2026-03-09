@@ -88,9 +88,10 @@ pub enum LoginResponse {
     MfaRequired { ticket: String },
 }
 
-/// Build a reqwest Client with anti-detection headers for unauthenticated requests.
-fn build_auth_client(config: &DiscordConfig) -> Result<reqwest::Client> {
-    use reqwest::header::{HeaderMap, HeaderValue};
+/// Build an HTTP client with anti-detection headers and Chrome TLS impersonation
+/// for unauthenticated requests.
+pub fn build_auth_client(config: &DiscordConfig) -> Result<rquest::Client> {
+    use rquest::header::{HeaderMap, HeaderValue};
 
     let super_props = anti_detection::build_super_properties(config);
     let mut headers = HeaderMap::new();
@@ -106,9 +107,7 @@ fn build_auth_client(config: &DiscordConfig) -> Result<reqwest::Client> {
     );
     headers.insert("X-Discord-Locale", HeaderValue::from_static("en-US"));
 
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
+    anti_detection::build_chrome_client(headers)
         .map_err(|e| eyre!("Failed to build HTTP client: {}", e))
 }
 
@@ -235,9 +234,11 @@ pub async fn validate_token_via_gateway(
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message;
 
+    let ws_request = anti_detection::build_ws_request(gateway_url, config)
+        .map_err(|e| eyre!("Failed to build gateway WS request: {e}"))?;
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(gateway_url),
+        tokio_tungstenite::connect_async(ws_request),
     )
     .await
     .map_err(|_| eyre!("Gateway connection timed out"))?
@@ -505,6 +506,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
         }
     }
 
@@ -912,26 +914,23 @@ mod tests {
     }
 
     /// Integration test that calls the real Discord API.
-    /// Run with: cargo test login_real_discord -- --ignored --nocapture
+    /// Run with: DISCORD_TEST_EMAIL=... DISCORD_TEST_PASSWORD=... cargo test login_real_discord -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn login_real_discord_returns_token() {
+        let email = std::env::var("DISCORD_TEST_EMAIL")
+            .expect("Set DISCORD_TEST_EMAIL env var to run this test");
+        let password = std::env::var("DISCORD_TEST_PASSWORD")
+            .expect("Set DISCORD_TEST_PASSWORD env var to run this test");
         let config = DiscordConfig::default();
-        let result = login_with_credentials(
-            "kugismugis@proton.me",
-            "syjJom-vactap-pirji3",
-            &config,
-            "https://discord.com/api/v10",
-        )
-        .await;
+        let result =
+            login_with_credentials(&email, &password, &config, "https://discord.com/api/v10").await;
 
         match result {
             Ok(LoginResponse::Token(token)) => {
-                println!("Login successful, token starts with: {}...", &token[..20]);
                 assert!(!token.is_empty());
             }
-            Ok(LoginResponse::MfaRequired { ticket }) => {
-                println!("MFA required, ticket: {}", ticket);
+            Ok(LoginResponse::MfaRequired { ticket: _ }) => {
                 // MFA is a valid response — login worked, just needs 2FA
             }
             Err(e) => {
@@ -1158,21 +1157,21 @@ mod tests {
     }
 
     /// Integration test: validate_token_via_gateway with real token.
-    /// Run with: cargo test validate_real_token -- --ignored --nocapture
+    /// Run with: DISCORD_TEST_TOKEN=... cargo test validate_real_token -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn validate_real_token() {
-        let token = "MTQ3NjE5MTg0MTM2NjgzNTIzMQ.G15AZf.uskt9twAYbZGXuQwwvYxxZwoZnwSaNr1arM8KQ";
+        let token = std::env::var("DISCORD_TEST_TOKEN")
+            .expect("Set DISCORD_TEST_TOKEN env var to run this test");
         let config = test_discord_config();
 
         let result = validate_token_via_gateway(
-            token,
+            &token,
             "wss://gateway.discord.gg/?v=10&encoding=json",
             &config,
         )
         .await;
 
-        println!("validate_token_via_gateway result: {result:?}");
         match result {
             Ok(valid) => assert!(valid, "Token should be valid"),
             Err(e) => panic!("Validation errored: {e}"),

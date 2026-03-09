@@ -67,7 +67,7 @@ RUST_LOG=debug cargo run             # Run with debug logging
 |-------|---------|
 | ratatui 0.30.0 | TUI framework |
 | tokio-tungstenite | Custom Discord gateway (NOT twilight-gateway — it's bot-only) |
-| reqwest | Custom Discord HTTP client (NOT twilight-http — it adds `Bot ` prefix) |
+| rquest + rquest-util | Custom Discord HTTP client with Chrome TLS fingerprint impersonation (NOT twilight-http — it adds `Bot ` prefix) |
 | twilight-model 0.17.x | Discord data types only (Id<T>, Message, Channel, Guild, etc.) |
 | flate2 | zlib-stream decompression for gateway |
 | rusqlite | SQLite database (via spawn_blocking) |
@@ -79,7 +79,7 @@ RUST_LOG=debug cargo run             # Run with debug logging
 
 All Discord API interactions MUST:
 1. Use IDENTIFY properties mimicking the web client (configurable in config.toml) — custom gateway sends these directly
-2. Set `X-Super-Properties`, `User-Agent`, `X-Discord-Locale` headers on ALL HTTP requests — custom reqwest client adds these
+2. Set `X-Super-Properties`, `User-Agent`, `X-Discord-Locale` headers on ALL HTTP requests — custom rquest client adds these
 3. Never call `POST /users/@me/channels` (use DM channels from READY event) — the method does not exist on HttpClient
 4. Respect rate limits (custom per-route rate limiter in HTTP actor, 50-150ms jitter)
 5. Use zlib-stream transport compression on gateway (flate2, persistent decompressor state)

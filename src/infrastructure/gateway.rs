@@ -53,7 +53,9 @@ impl GatewayConnection {
     /// `cmd_rx` receives commands from the main loop (e.g. guild subscriptions).
     #[allow(clippy::too_many_lines)]
     pub async fn run(self, cmd_rx: &mut mpsc::Receiver<GatewayCommand>) -> Result<SessionInfo> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
+        let ws_request = anti_detection::build_ws_request(&self.gateway_url, &self.config)
+            .wrap_err("Failed to build gateway WS request")?;
+        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_request)
             .await
             .wrap_err("Failed to connect to gateway")?;
 
@@ -205,6 +207,15 @@ impl GatewayConnection {
                                 );
                             }
                         }
+                        GatewayCommand::UpdatePresence { status, afk } => {
+                            let payload = build_presence_update(&status, afk);
+                            if let Ok(text) = serde_json::to_string(&payload) {
+                                if let Err(e) = write.send(Message::Text(text.into())).await {
+                                    tracing::error!("Failed to send presence update: {}", e);
+                                }
+                                tracing::debug!("Sent presence update: status={status} afk={afk}");
+                            }
+                        }
                     }
                 }
 
@@ -257,7 +268,9 @@ impl GatewayConnection {
         sequence: u64,
         cmd_rx: &mut mpsc::Receiver<GatewayCommand>,
     ) -> Result<SessionInfo> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&self.gateway_url)
+        let ws_request = anti_detection::build_ws_request(&self.gateway_url, &self.config)
+            .wrap_err("Failed to build gateway WS request for RESUME")?;
+        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_request)
             .await
             .wrap_err("Failed to connect to gateway for RESUME")?;
 
@@ -404,6 +417,14 @@ impl GatewayConnection {
                                     "Sent guild subscription for guild={} channels={:?} (resume)",
                                     guild_id.get(), ch_ids
                                 );
+                            }
+                        }
+                        GatewayCommand::UpdatePresence { status, afk } => {
+                            let payload = build_presence_update(&status, afk);
+                            if let Ok(text) = serde_json::to_string(&payload) {
+                                if let Err(e) = write.send(Message::Text(text.into())).await {
+                                    tracing::error!("Failed to send presence update: {}", e);
+                                }
                             }
                         }
                     }
@@ -554,7 +575,7 @@ pub fn build_identify_payload(token: &str, config: &DiscordConfig) -> serde_json
         "op": 2,
         "d": {
             "token": token,
-            "capabilities": 30717,
+            "capabilities": config.capabilities,
             "properties": properties,
             "presence": {
                 "status": "online",
@@ -594,6 +615,25 @@ pub fn build_heartbeat_payload(sequence: Option<u64>) -> serde_json::Value {
     serde_json::json!({
         "op": 1,
         "d": sequence,
+    })
+}
+
+/// Build a presence update (op 3) payload.
+/// Used for idle/online transitions to mimic real client behavior.
+pub fn build_presence_update(status: &str, afk: bool) -> serde_json::Value {
+    let since = if afk {
+        serde_json::json!(chrono::Utc::now().timestamp_millis())
+    } else {
+        serde_json::json!(0)
+    };
+    serde_json::json!({
+        "op": 3,
+        "d": {
+            "status": status,
+            "since": since,
+            "activities": [],
+            "afk": afk
+        }
     })
 }
 
@@ -860,6 +900,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
         };
         let payload = build_identify_payload("test_token", &config);
 
@@ -867,7 +908,7 @@ mod tests {
         assert_eq!(payload["d"]["token"], "test_token");
         assert_eq!(payload["d"]["properties"]["os"], "Mac OS X");
         assert_eq!(payload["d"]["properties"]["browser"], "Chrome");
-        assert_eq!(payload["d"]["properties"]["client_build_number"], 346892);
+        assert_eq!(payload["d"]["properties"]["clientBuildNumber"], 346892);
         assert_eq!(payload["d"]["large_threshold"], 250);
 
         // CRITICAL: No intents field for user accounts
@@ -883,14 +924,12 @@ mod tests {
             client_build_number: 999999,
             browser_version: "200.0.0.0".to_string(),
             browser_user_agent: "Custom/1.0".to_string(),
+            ..Default::default()
         };
         let payload = build_identify_payload("token", &config);
-        assert_eq!(payload["d"]["properties"]["client_build_number"], 999999);
-        assert_eq!(payload["d"]["properties"]["browser_version"], "200.0.0.0");
-        assert_eq!(
-            payload["d"]["properties"]["browser_user_agent"],
-            "Custom/1.0"
-        );
+        assert_eq!(payload["d"]["properties"]["clientBuildNumber"], 999999);
+        assert_eq!(payload["d"]["properties"]["browserVersion"], "200.0.0.0");
+        assert_eq!(payload["d"]["properties"]["browserUserAgent"], "Custom/1.0");
     }
 
     #[test]
@@ -968,6 +1007,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
         };
         let payload = build_identify_payload("test_token", &config);
         let d = &payload["d"];
@@ -988,6 +1028,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
         };
         let payload = build_identify_payload("test_token", &config);
         let cs = &payload["d"]["client_state"];
@@ -1013,6 +1054,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
         };
         let payload = build_identify_payload("test_token", &config);
         let p = &payload["d"]["presence"];

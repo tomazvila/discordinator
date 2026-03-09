@@ -13,9 +13,11 @@ use discordinator::domain::event::GatewayEvent;
 use discordinator::domain::types::{
     BackgroundResult, ConnectionState, DbRequest, GatewayCommand, HttpRequest,
 };
+use discordinator::infrastructure::discord_properties;
 use discordinator::infrastructure::gateway::GatewayManager;
 use discordinator::infrastructure::http_client::HttpActor;
 use discordinator::infrastructure::keyring::KeyringStore;
+use discordinator::infrastructure::science::ScienceTracker;
 use discordinator::input::mode::InputMode;
 use discordinator::ui::login::{LoginMethod, LoginScreen, LoginState, LoginStatus};
 
@@ -25,6 +27,11 @@ const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle --check-properties flag before any TUI setup
+    if std::env::args().any(|a| a == "--check-properties") {
+        return check_properties_cli().await;
+    }
+
     discordinator::logging::install_panic_handler()?;
     let dirs = AppDirs::new()?;
     let config = discordinator::config::load_or_create_config(&dirs.config_file())?;
@@ -39,6 +46,50 @@ async fn main() -> Result<()> {
     result
 }
 
+/// CLI mode: fetch current Discord properties and compare against config defaults.
+async fn check_properties_cli() -> Result<()> {
+    let config = discordinator::config::DiscordConfig::default();
+    println!("Fetching current Discord client properties...");
+
+    match discord_properties::fetch_discord_properties(&config.browser_user_agent).await {
+        Ok(props) => {
+            println!("\n  Current Discord properties:");
+            println!("    Build number:     {}", props.client_build_number);
+            println!("    Capabilities:     {}", props.capabilities);
+            println!("    Browser version:  {}", props.browser_version);
+            println!("\n  Compiled-in defaults:");
+            println!("    Build number:     {}", config.client_build_number);
+            println!("    Capabilities:     {}", config.capabilities);
+            println!("    Browser version:  {}", config.browser_version);
+
+            let mut stale = false;
+            if props.client_build_number != config.client_build_number {
+                println!(
+                    "\n  WARNING: Build number is stale ({} vs {})",
+                    config.client_build_number, props.client_build_number
+                );
+                stale = true;
+            }
+            if props.capabilities != config.capabilities {
+                println!(
+                    "\n  WARNING: Capabilities bitmask is stale ({} vs {})",
+                    config.capabilities, props.capabilities
+                );
+                stale = true;
+            }
+            if !stale {
+                println!("\n  All properties are up to date.");
+            }
+            println!("\n  Note: Auto-fetch at startup will use the live values regardless.");
+        }
+        Err(e) => {
+            println!("  Failed to fetch properties: {e}");
+            println!("  The app will fall back to compiled-in defaults.");
+        }
+    }
+    Ok(())
+}
+
 /// What `run_app` decided when it returned.
 enum RunResult {
     /// User pressed Ctrl+Q — exit the application.
@@ -47,7 +98,25 @@ enum RunResult {
     ReturnToLogin,
 }
 
-async fn run(terminal: &mut Term, config: AppConfig) -> Result<()> {
+async fn run(terminal: &mut Term, mut config: AppConfig) -> Result<()> {
+    // Auto-fetch Discord client properties (build number, capabilities, browser version)
+    let dirs = AppDirs::new()?;
+    let cache_path = dirs.cache_dir.join("discord_properties.json");
+    match fetch_or_load_properties(&cache_path, &config.discord.browser_user_agent).await {
+        Some(props) => {
+            tracing::info!(
+                build_number = props.client_build_number,
+                capabilities = props.capabilities,
+                browser_version = %props.browser_version,
+                "Using auto-fetched Discord properties"
+            );
+            config.discord.apply_fetched_properties(&props);
+        }
+        None => {
+            tracing::warn!("Could not fetch Discord properties, using config defaults");
+        }
+    }
+
     let keyring = KeyringStore;
     let env_getter = |key: &str| -> Option<String> { std::env::var(key).ok() };
 
@@ -119,6 +188,14 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     let mut render_interval = tokio::time::interval(Duration::from_millis(render_ms));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Science/telemetry tracker for anti-detection
+    let mut science = ScienceTracker::new();
+    let mut science_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    science_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // Periodic re-subscription for all open panes (prevents Discord from dropping
     // idle lazy guild subscriptions for non-focused panes)
     let mut resub_interval = tokio::time::interval(Duration::from_secs(30));
@@ -128,6 +205,12 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
     let connect_deadline = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(connect_deadline);
     let mut connected = false;
+
+    // Idle presence timer: after 5 minutes of no input, transition to idle
+    let idle_timeout = Duration::from_secs(300);
+    let idle_timer = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle_timer);
+    let mut is_idle = false;
 
     // Load session on startup if configured
     if app.state.config.session.restore_on_start {
@@ -146,6 +229,9 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
                 );
                 if !connected && matches!(app.state.connection, ConnectionState::Connected { .. }) {
                     connected = true;
+                    // Send startup requests that mimic real client behavior after READY
+                    let _ = http_tx.try_send(HttpRequest::StartupRequests);
+                    science.track_app_opened();
                 }
             }
 
@@ -188,7 +274,17 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
                             }
                             app.dirty |= handle_key_with_dispatch(
                                 &mut app, key, &http_tx, &db_tx, &gw_cmd_tx,
+                                &mut science,
                             );
+                            // Reset idle timer on any key input
+                            idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                            if is_idle {
+                                is_idle = false;
+                                let _ = gw_cmd_tx.try_send(GatewayCommand::UpdatePresence {
+                                    status: "online".to_string(),
+                                    afk: false,
+                                });
+                            }
                         }
                         Event::Resize(_, _) => app.dirty = true,
                         _ => {}
@@ -198,6 +294,20 @@ async fn run_app(terminal: &mut Term, config: AppConfig, token: SecretString) ->
 
             () = &mut connect_deadline, if !connected => {
                 return Ok(RunResult::ReturnToLogin);
+            }
+
+            () = &mut idle_timer, if !is_idle => {
+                is_idle = true;
+                let _ = gw_cmd_tx.try_send(GatewayCommand::UpdatePresence {
+                    status: "idle".to_string(),
+                    afk: true,
+                });
+            }
+
+            _ = science_interval.tick() => {
+                if let Some(batch) = science.drain_batch() {
+                    let _ = http_tx.try_send(HttpRequest::ScienceBatch { payload: batch });
+                }
             }
 
             _ = resub_interval.tick() => {
@@ -238,6 +348,7 @@ fn handle_key_with_dispatch(
     http_tx: &mpsc::Sender<HttpRequest>,
     db_tx: &mpsc::Sender<DbRequest>,
     gw_cmd_tx: &mpsc::Sender<GatewayCommand>,
+    science: &mut ScienceTracker,
 ) -> bool {
     // Capture pre-action state for dispatch
     let pre_channel = app.state.focused_pane().channel_id;
@@ -293,7 +404,7 @@ fn handle_key_with_dispatch(
         }
     }
 
-    // SwitchChannel → fetch messages + subscribe to gateway events
+    // SwitchChannel → fetch messages + subscribe to gateway events + ack latest message
     let post_channel = app.state.focused_pane().channel_id;
     if post_channel != pre_channel {
         if let Some(ch_id) = post_channel {
@@ -307,6 +418,20 @@ fn handle_key_with_dispatch(
                 before: None,
                 limit: 50,
             });
+            // Ack the latest message in the channel (read state)
+            if let Some(last_msg) = app.state.cache.last_message_id(ch_id) {
+                let _ = http_tx.try_send(HttpRequest::AckMessage {
+                    channel_id: ch_id,
+                    message_id: last_msg,
+                });
+            }
+            // Track channel opened for science/telemetry
+            let guild_id = app
+                .state
+                .focused_pane()
+                .guild_id
+                .map(twilight_model::id::Id::get);
+            science.track_channel_opened(ch_id.get(), guild_id);
         }
 
         // Re-subscribe ALL open panes' guild/channels via op 14, not just the focused one.
@@ -329,13 +454,19 @@ fn subscribe_all_panes(
     }
 }
 
+/// Generate a Discord Snowflake-format nonce.
+/// Discord epoch is 2015-01-01. Format: `(timestamp_ms - discord_epoch) << 22 | increment`.
+/// The low 22 bits contain a random value to mimic real client worker/increment fields.
 fn generate_nonce() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
+    const DISCORD_EPOCH: u128 = 1_420_070_400_000;
+    let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
-        .to_string()
+        .as_millis();
+    let low_bits = u128::from(rand::random::<u32>() & 0x003F_FFFF);
+    let snowflake = (now_ms.saturating_sub(DISCORD_EPOCH)) << 22 | low_bits;
+    snowflake.to_string()
 }
 
 // === DB Worker ===
@@ -572,9 +703,14 @@ async fn run_qr_auth_flow(
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
 
+    let ws_request = discordinator::infrastructure::anti_detection::build_ws_request(
+        "wss://remote-auth-gateway.discord.gg/?v=2",
+        config,
+    )
+    .map_err(|e| eyre!("Failed to build QR auth WS request: {e}"))?;
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async("wss://remote-auth-gateway.discord.gg/?v=2"),
+        tokio_tungstenite::connect_async(ws_request),
     )
     .await
     .map_err(|_| eyre!("QR auth gateway connection timed out"))?
@@ -670,14 +806,9 @@ async fn exchange_qr_ticket(
     ticket: &str,
     config: &discordinator::config::DiscordConfig,
 ) -> Result<String> {
-    let super_props = discordinator::infrastructure::anti_detection::build_super_properties(config);
-
-    let client = reqwest::Client::new();
+    let client = discordinator::auth::build_auth_client(config)?;
     let response = client
         .post(format!("{DISCORD_API_BASE}/users/@me/remote-auth/login"))
-        .header("User-Agent", &config.browser_user_agent)
-        .header("X-Super-Properties", &super_props)
-        .header("X-Discord-Locale", "en-US")
         .json(&serde_json::json!({ "ticket": ticket }))
         .send()
         .await
@@ -692,4 +823,29 @@ async fn exchange_qr_ticket(
         .as_str()
         .map(String::from)
         .ok_or_else(|| eyre!("No encrypted_token in QR response"))
+}
+
+/// Try to load cached Discord properties, or fetch fresh ones.
+async fn fetch_or_load_properties(
+    cache_path: &std::path::Path,
+    user_agent: &str,
+) -> Option<discord_properties::DiscordProperties> {
+    // Try cache first
+    if let Some(cached) = discord_properties::load_cached(cache_path) {
+        return Some(cached);
+    }
+
+    // Fetch fresh
+    match discord_properties::fetch_discord_properties(user_agent).await {
+        Ok(props) => {
+            if let Err(e) = discord_properties::save_cached(cache_path, &props) {
+                tracing::warn!("Failed to cache Discord properties: {e}");
+            }
+            Some(props)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch Discord properties: {e}");
+            None
+        }
+    }
 }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr};
 use rand::Rng;
-use reqwest::header::HeaderMap;
+use rquest::header::HeaderMap;
 use tokio::sync::mpsc;
 
 use crate::config::DiscordConfig;
@@ -33,7 +33,7 @@ struct RateLimitBucket {
 /// **No `create_dm_channel()` method exists** — this is intentional to prevent
 /// accidental DM creation which triggers Discord detection.
 pub struct HttpActor {
-    client: reqwest::Client,
+    client: rquest::Client,
     headers: HeaderMap,
     rate_limits: HashMap<String, RateLimitBucket>,
     request_rx: mpsc::Receiver<HttpRequest>,
@@ -50,9 +50,7 @@ impl HttpActor {
     ) -> Result<Self> {
         let headers = anti_detection::build_http_headers(config, token)
             .wrap_err("Failed to build anti-detection HTTP headers")?;
-        let client = reqwest::Client::builder()
-            .default_headers(headers.clone())
-            .build()
+        let client = anti_detection::build_chrome_client(headers.clone())
             .wrap_err("Failed to build HTTP client")?;
 
         Ok(Self {
@@ -101,6 +99,12 @@ impl HttpActor {
                 limit,
             } => self.fetch_messages(*channel_id, *before, *limit).await,
             HttpRequest::SendTyping { channel_id } => self.send_typing(*channel_id).await,
+            HttpRequest::AckMessage {
+                channel_id,
+                message_id,
+            } => self.ack_message(*channel_id, *message_id).await,
+            HttpRequest::StartupRequests => self.send_startup_requests().await,
+            HttpRequest::ScienceBatch { payload } => self.send_science(payload).await,
         };
 
         if let Err(e) = result {
@@ -125,7 +129,7 @@ impl HttpActor {
     }
 
     /// Update rate limit state from response headers.
-    fn update_rate_limit(&mut self, route: &str, headers: &reqwest::header::HeaderMap) {
+    fn update_rate_limit(&mut self, route: &str, headers: &rquest::header::HeaderMap) {
         let remaining = headers
             .get("X-RateLimit-Remaining")
             .and_then(|v| v.to_str().ok())
@@ -157,16 +161,7 @@ impl HttpActor {
         let route = format!("POST /channels/{channel_id}/messages");
         self.check_rate_limit(&route).await;
 
-        let mut body = serde_json::json!({
-            "content": content,
-            "nonce": nonce,
-        });
-
-        if let Some(reply_id) = reply_to {
-            body["message_reference"] = serde_json::json!({
-                "message_id": reply_id.get().to_string(),
-            });
-        }
+        let body = build_message_body(content, nonce, reply_to);
 
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let response = self
@@ -338,10 +333,114 @@ impl HttpActor {
         Ok(())
     }
 
+    async fn ack_message(
+        &mut self,
+        channel_id: Id<ChannelMarker>,
+        message_id: Id<MessageMarker>,
+    ) -> Result<()> {
+        let route = format!("POST /channels/{channel_id}/messages/ack");
+        self.check_rate_limit(&route).await;
+
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/ack");
+        let body = serde_json::json!({ "token": null });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .wrap_err("Failed to ack message")?;
+
+        self.update_rate_limit(&route, response.headers());
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::debug!("Ack message failed: {} - {}", status, body);
+        }
+
+        Ok(())
+    }
+
+    /// Send startup requests that the real Discord web client makes after READY.
+    /// These are fire-and-forget — we don't use the responses, but their presence
+    /// in the request pattern makes the client look more legitimate.
+    async fn send_startup_requests(&mut self) -> Result<()> {
+        let endpoints = [
+            "GET /users/@me/settings",
+            "GET /users/@me/affinities/guilds",
+            "GET /users/@me/affinities/users",
+            "GET /users/@me/library",
+        ];
+
+        for endpoint in &endpoints {
+            let path = endpoint.strip_prefix("GET ").unwrap_or(endpoint);
+            let url = format!("{DISCORD_API_BASE}{path}");
+            let route = (*endpoint).to_string();
+            self.check_rate_limit(&route).await;
+
+            // Add jitter between requests to look human
+            let jitter = rand::thread_rng().gen_range(MIN_JITTER_MS..=MAX_JITTER_MS);
+            tokio::time::sleep(Duration::from_millis(jitter)).await;
+
+            match self.client.get(&url).send().await {
+                Ok(response) => {
+                    self.update_rate_limit(&route, response.headers());
+                    tracing::debug!("Startup request {} -> {}", endpoint, response.status());
+                }
+                Err(e) => {
+                    tracing::debug!("Startup request {} failed: {}", endpoint, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_science(&mut self, payload: &serde_json::Value) -> Result<()> {
+        let route = "POST /science".to_string();
+        self.check_rate_limit(&route).await;
+
+        let url = format!("{DISCORD_API_BASE}/science");
+        match self.client.post(&url).json(payload).send().await {
+            Ok(response) => {
+                self.update_rate_limit(&route, response.headers());
+                tracing::debug!("Science POST -> {}", response.status());
+            }
+            Err(e) => {
+                tracing::debug!("Science POST failed: {}", e);
+            }
+        }
+        Ok(())
+    }
+
     /// Get a reference to the default headers (for testing).
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
+}
+
+/// Build the JSON body for sending a message, matching Discord web client fields.
+fn build_message_body(
+    content: &str,
+    nonce: &str,
+    reply_to: Option<Id<MessageMarker>>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "content": content,
+        "nonce": nonce,
+        "flags": 0,
+        "tts": false,
+    });
+
+    if let Some(reply_id) = reply_to {
+        body["message_reference"] = serde_json::json!({
+            "message_id": reply_id.get().to_string(),
+        });
+    }
+
+    body
 }
 
 /// Parse a Discord messages response JSON array into `CachedMessages`.
@@ -478,6 +577,7 @@ mod tests {
             client_build_number: 346892,
             browser_version: "131.0.0.0".to_string(),
             browser_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36".to_string(),
+            ..Default::default()
         }
     }
 
@@ -641,14 +741,14 @@ mod tests {
         let mut actor = HttpActor::new(&config, "token", req_rx, result_tx).unwrap();
 
         // Simulate a response with rate limit headers
-        let mut headers = reqwest::header::HeaderMap::new();
+        let mut headers = rquest::header::HeaderMap::new();
         headers.insert(
             "X-RateLimit-Remaining",
-            reqwest::header::HeaderValue::from_static("5"),
+            rquest::header::HeaderValue::from_static("5"),
         );
         headers.insert(
             "X-RateLimit-Reset-After",
-            reqwest::header::HeaderValue::from_static("2.0"),
+            rquest::header::HeaderValue::from_static("2.0"),
         );
 
         actor.update_rate_limit("GET /channels/123/messages", &headers);
@@ -721,5 +821,26 @@ mod tests {
         assert!(MIN_JITTER_MS < MAX_JITTER_MS);
         assert_eq!(MIN_JITTER_MS, 50);
         assert_eq!(MAX_JITTER_MS, 150);
+    }
+
+    #[test]
+    fn message_body_has_required_fields() {
+        let body = build_message_body("hello", "12345", None);
+        assert_eq!(body["content"], "hello");
+        assert_eq!(body["nonce"], "12345");
+        assert_eq!(body["flags"], 0);
+        assert_eq!(body["tts"], false);
+    }
+
+    #[test]
+    fn message_body_with_reply_has_reference() {
+        let reply_id = Id::new(99999);
+        let body = build_message_body("reply text", "67890", Some(reply_id));
+        assert_eq!(body["content"], "reply text");
+        assert!(body["message_reference"].is_object());
+        assert_eq!(
+            body["message_reference"]["message_id"],
+            reply_id.get().to_string()
+        );
     }
 }

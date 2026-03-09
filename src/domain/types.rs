@@ -249,6 +249,17 @@ pub enum HttpRequest {
     SendTyping {
         channel_id: Id<ChannelMarker>,
     },
+    AckMessage {
+        channel_id: Id<ChannelMarker>,
+        message_id: Id<MessageMarker>,
+    },
+    /// Fire-and-forget GET requests for startup sequence (anti-detection).
+    /// Mimics what the real Discord web client fetches after READY.
+    StartupRequests,
+    /// Send a batch of science/telemetry events to `/api/v10/science`.
+    ScienceBatch {
+        payload: serde_json::Value,
+    },
 }
 
 /// Requests sent to the `SQLite` worker task.
@@ -286,6 +297,8 @@ pub enum GatewayCommand {
         guild_id: Id<GuildMarker>,
         channels: Vec<Id<ChannelMarker>>,
     },
+    /// Update presence (op 3) — used for idle/online transitions.
+    UpdatePresence { status: String, afk: bool },
 }
 
 /// Results from background tasks back to main loop.
